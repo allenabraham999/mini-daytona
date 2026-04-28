@@ -9,6 +9,9 @@ services:
       - ORCHESTRATOR_PORT=9000
     ports:
       - "9000:9000"
+    volumes:
+      - /var/lib/incus/unix.socket:/var/lib/incus/unix.socket
+    privileged: true
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/healthz').read()"]
       interval: 10s
