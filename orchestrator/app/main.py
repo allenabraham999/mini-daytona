@@ -95,7 +95,7 @@ async def get_sandbox(sandbox_id: str, pool: PoolManager = Depends(get_pool)) ->
     return SandboxView(**sb.to_dict())
 
 
-@app.delete("/sandbox/{sandbox_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/sandbox/{sandbox_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 async def release(sandbox_id: str, pool: PoolManager = Depends(get_pool)) -> None:
     await pool.release(sandbox_id)
 

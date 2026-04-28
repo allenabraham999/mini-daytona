@@ -95,7 +95,7 @@ async def create_sandbox(
     )
 
 
-@app.delete("/sandbox/{sandbox_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/sandbox/{sandbox_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 async def destroy_sandbox(
     sandbox_id: str,
     principal: Principal = Depends(authenticate),
