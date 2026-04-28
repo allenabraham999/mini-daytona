@@ -100,6 +100,15 @@ async def release(sandbox_id: str, pool: PoolManager = Depends(get_pool)) -> Non
     await pool.release(sandbox_id)
 
 
+@app.get("/internal/sandbox/metrics")
+async def sandbox_metrics(backend=Depends(get_backend)) -> dict:
+    from .sandbox.incus import IncusSandboxBackend
+
+    if not isinstance(backend, IncusSandboxBackend):
+        return {"error": "metrics only available for incus backend"}
+    return backend.boot_metrics()
+
+
 @app.post("/sandbox/{sandbox_id}/exec", response_model=ExecResponse)
 async def exec_in_sandbox(
     sandbox_id: str,
