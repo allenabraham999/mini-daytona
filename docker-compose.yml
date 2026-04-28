@@ -1,0 +1,32 @@
+services:
+  orchestrator:
+    build:
+      context: ./orchestrator
+    env_file:
+      - .env
+    environment:
+      - ORCHESTRATOR_HOST=0.0.0.0
+      - ORCHESTRATOR_PORT=9000
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/healthz').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  api_gateway:
+    build:
+      context: ./api_gateway
+    env_file:
+      - .env
+    environment:
+      - GATEWAY_HOST=0.0.0.0
+      - GATEWAY_PORT=8000
+      - ORCHESTRATOR_URL=http://orchestrator:9000
+    ports:
+      - "8000:8000"
+    depends_on:
+      orchestrator:
+        condition: service_healthy
