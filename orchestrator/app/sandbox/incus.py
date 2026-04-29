@@ -10,6 +10,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 
+from ..config import settings
 from .base import ExecResult, SandboxBackend, SandboxHandle
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,14 @@ logger = logging.getLogger(__name__)
 BASE_CONTAINER = "base-container"
 BASE_SNAPSHOT = "snap0"
 POOL_SIZE = 5
+INCUS_PROJECT = settings.incus_project
+
+
+def _with_project(args: tuple[str, ...]) -> tuple[str, ...]:
+    """Inject `--project <INCUS_PROJECT>` immediately after the leading `incus`."""
+    if args and args[0] == "incus":
+        return ("incus", "--project", INCUS_PROJECT, *args[1:])
+    return args
 
 
 @dataclass
@@ -54,6 +63,7 @@ async def _run(
     *args: str, timeout: float = 30.0, check: bool = True
 ) -> tuple[int, str, str]:
     """Run an incus CLI command asynchronously."""
+    args = _with_project(args)
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
@@ -81,6 +91,7 @@ async def _run_streaming(
     *args: str, timeout: float = 30.0, stdin_data: bytes | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Run an incus CLI command and yield line-by-line output dicts."""
+    args = _with_project(args)
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
@@ -142,7 +153,7 @@ async def _run_streaming(
 async def _stream_file_pull(sandbox_id: str, path: str) -> AsyncGenerator[bytes, None]:
     """Stream the contents of `path` inside `sandbox_id` via `incus file pull`."""
     proc = await asyncio.create_subprocess_exec(
-        "incus", "file", "pull", f"{sandbox_id}{path}", "-",
+        *_with_project(("incus", "file", "pull", f"{sandbox_id}{path}", "-")),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

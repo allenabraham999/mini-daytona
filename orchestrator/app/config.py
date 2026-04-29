@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     health_check_interval_seconds: int = 30
 
     sandbox_backend: str = "mock"
+    incus_project: str = "default"
 
 
 settings = Settings()
