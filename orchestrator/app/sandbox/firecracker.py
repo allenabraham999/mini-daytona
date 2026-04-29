@@ -141,14 +141,15 @@ class FirecrackerSandboxBackend(SandboxBackend):
                 stderr=asyncio.subprocess.DEVNULL,
             )
 
-            # Wait for the API socket to appear (up to 500 ms)
-            for _ in range(50):
+            # Wait for the API socket to appear (up to 2000 ms)
+            await asyncio.sleep(0.1)
+            for _ in range(190):
                 await asyncio.sleep(0.01)
                 if os.path.exists(socket_path):
                     break
             else:
                 raise RuntimeError(
-                    f"Firecracker socket {socket_path} did not appear within 500 ms"
+                    f"Firecracker socket {socket_path} did not appear within 2000 ms"
                 )
 
             # 2. Create TAP interface on the host
