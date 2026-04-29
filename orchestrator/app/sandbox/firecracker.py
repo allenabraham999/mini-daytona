@@ -4,6 +4,7 @@ import asyncio
 import http.client
 import itertools
 import json
+import logging
 import os
 import socket
 import time
@@ -12,6 +13,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .base import ExecResult, SandboxBackend, SandboxHandle
+
+logger = logging.getLogger(__name__)
 
 _BINARY    = os.environ.get("FIRECRACKER_BINARY",    "/usr/local/bin/firecracker")
 _SNAP_FILE = os.environ.get("FIRECRACKER_SNAP_FILE", "/home/ubuntu/firecracker-demo/snap.file")
@@ -115,6 +118,15 @@ class FirecrackerSandboxBackend(SandboxBackend):
         )
         return await proc.wait()
 
+    @staticmethod
+    async def _drain_pipes(process: asyncio.subprocess.Process) -> tuple[str, str]:
+        """Read buffered stdout/stderr from an already-terminated process."""
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(process.communicate(), timeout=2.0)
+            return stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
+        except Exception as exc:
+            return f"(read error: {exc})", f"(read error: {exc})"
+
     # ------------------------------------------------------------------ #
     # create
     # ------------------------------------------------------------------ #
@@ -133,23 +145,74 @@ class FirecrackerSandboxBackend(SandboxBackend):
 
         try:
             # 1. Start Firecracker process
+            cmd = [_BINARY, "--api-sock", socket_path, "--log-level", "Error"]
+            logger.info("Starting Firecracker: %s", " ".join(cmd))
             process = await asyncio.create_subprocess_exec(
-                _BINARY,
-                "--api-sock", socket_path,
-                "--log-level", "Error",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            logger.info("Firecracker process started (PID=%s)", process.pid)
+
+            # Immediately check whether the process is still alive.
+            await asyncio.sleep(0.05)
+            if process.returncode is not None:
+                out, err = await self._drain_pipes(process)
+                logger.error(
+                    "Firecracker exited immediately (PID=%s code=%d)\n"
+                    "  stdout: %s\n  stderr: %s",
+                    process.pid, process.returncode, out, err,
+                )
+                raise RuntimeError(
+                    f"Firecracker exited immediately with code {process.returncode}"
+                )
+            logger.info(
+                "Firecracker alive (PID=%s), waiting for socket %s", process.pid, socket_path
             )
 
-            # Wait for the API socket to appear (up to 2000 ms)
-            await asyncio.sleep(0.1)
-            for _ in range(190):
-                await asyncio.sleep(0.01)
-                if os.path.exists(socket_path):
+            # Wait for the API socket to appear (up to 3000 ms, 50 ms poll interval)
+            socket_found = False
+            for attempt in range(60):
+                await asyncio.sleep(0.05)
+                alive = process.returncode is None
+                exists = os.path.exists(socket_path)
+                logger.debug(
+                    "Socket poll %d/60: exists=%s process_alive=%s path=%s",
+                    attempt + 1, exists, alive, socket_path,
+                )
+                if exists:
+                    logger.info(
+                        "Firecracker socket appeared after poll %d (~%d ms)",
+                        attempt + 1, (attempt + 1) * 50,
+                    )
+                    socket_found = True
                     break
-            else:
+                if not alive:
+                    out, err = await self._drain_pipes(process)
+                    logger.error(
+                        "Firecracker (PID=%s) died at poll %d (code=%d)\n"
+                        "  stdout: %s\n  stderr: %s",
+                        process.pid, attempt + 1, process.returncode, out, err,
+                    )
+                    raise RuntimeError(
+                        f"Firecracker process died (code={process.returncode}) "
+                        "before socket appeared"
+                    )
+
+            if not socket_found:
+                alive = process.returncode is None
+                logger.error(
+                    "Firecracker socket %s did not appear within 3000 ms "
+                    "(process alive: %s, PID=%s)",
+                    socket_path, alive, process.pid,
+                )
+                if not alive:
+                    out, err = await self._drain_pipes(process)
+                    logger.error(
+                        "  stdout: %s\n  stderr: %s", out, err
+                    )
                 raise RuntimeError(
-                    f"Firecracker socket {socket_path} did not appear within 2000 ms"
+                    f"Firecracker socket {socket_path} did not appear within 3000 ms"
                 )
 
             # 2. Create TAP interface on the host
