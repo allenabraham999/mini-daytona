@@ -335,11 +335,6 @@ class IncusSandboxBackend(SandboxBackend):
     async def upload_file(
         self, sandbox_id: str, local_path: str, dest_path: str
     ) -> None:
-        async with self._lock:
-            alive = sandbox_id in self._alive
-        if not alive:
-            raise FileNotFoundError(f"sandbox {sandbox_id} not found")
-
         dest_dir = dest_path.rsplit("/", 1)[0] or "/"
         await _run(
             "incus", "exec", sandbox_id, "--",
@@ -355,11 +350,6 @@ class IncusSandboxBackend(SandboxBackend):
     async def download_file(
         self, sandbox_id: str, path: str
     ) -> AsyncGenerator[bytes, None]:
-        async with self._lock:
-            alive = sandbox_id in self._alive
-        if not alive:
-            raise FileNotFoundError(f"sandbox {sandbox_id} not found")
-
         # Verify the file exists before we start streaming so callers can map
         # the failure to a 404 instead of a broken response stream.
         rc, _, _ = await _run(
@@ -375,11 +365,6 @@ class IncusSandboxBackend(SandboxBackend):
     async def list_files(
         self, sandbox_id: str, directory: str
     ) -> list[dict]:
-        async with self._lock:
-            alive = sandbox_id in self._alive
-        if not alive:
-            raise FileNotFoundError(f"sandbox {sandbox_id} not found")
-
         rc, stdout, stderr = await _run(
             "incus", "exec", sandbox_id, "--",
             "ls", "-la", "--time-style=full-iso", directory,
