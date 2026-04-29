@@ -100,6 +100,13 @@ async def release(sandbox_id: str, pool: PoolManager = Depends(get_pool)) -> Non
     await pool.release(sandbox_id)
 
 
+@app.get("/internal/sandbox/metrics")
+async def sandbox_metrics(backend=Depends(get_backend)) -> dict:
+    if hasattr(backend, "boot_metrics"):
+        return await backend.boot_metrics()
+    return {"error": "metrics not available for this backend"}
+
+
 @app.post("/sandbox/{sandbox_id}/exec", response_model=ExecResponse)
 async def exec_in_sandbox(
     sandbox_id: str,
