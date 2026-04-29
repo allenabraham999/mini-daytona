@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import secrets
 import time
 import uuid
@@ -340,15 +341,28 @@ class IncusSandboxBackend(SandboxBackend):
     ) -> AsyncGenerator[dict, None]:
         """Pipe `payload` into `python3 /usr/local/bin/agent` running inside
         the sandbox and yield each stdout line as a parsed agent event.
-        Stderr lines and the eventual exit code are surfaced as raw events."""
+        Stderr lines and the eventual exit code are surfaced as raw events.
+
+        The OpenAI key is sourced from the orchestrator's environment and
+        forwarded to the in-sandbox agent via `--env`, so it never crosses the
+        public HTTP surface."""
         async with self._lock:
             alive = sandbox_id in self._alive
         if not alive:
             yield {"type": "error", "message": f"sandbox {sandbox_id} not found"}
             yield {"type": "exit", "data": "127"}
             return
+
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY is not set in the orchestrator environment"
+            )
+
         async for chunk in _run_streaming(
-            "incus", "exec", sandbox_id, "-T", "--",
+            "incus", "exec", sandbox_id, "-T",
+            "--env", f"OPENAI_API_KEY={api_key}",
+            "--",
             "python3", "/usr/local/bin/agent",
             timeout=float(timeout_seconds),
             stdin_data=payload,

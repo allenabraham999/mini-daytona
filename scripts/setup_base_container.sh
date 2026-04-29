@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Provisions the Incus base-container with everything the agent needs:
 #   - python3 + pip
-#   - anthropic SDK
+#   - openai SDK
 #   - /usr/local/bin/agent (the agent.py shipped in this repo)
 #
 # Run this once on the host that runs the orchestrator. Re-run it after
@@ -41,10 +41,10 @@ incus exec "$BASE" -- bash -c '
   apt-get install -y -qq python3 python3-pip python3-venv ca-certificates >/dev/null
 '
 
-echo "==> installing anthropic SDK"
+echo "==> installing openai SDK"
 incus exec "$BASE" -- bash -c '
   set -e
-  pip3 install --quiet --break-system-packages anthropic || pip3 install --quiet anthropic
+  pip3 install --quiet --break-system-packages openai || pip3 install --quiet openai
 '
 
 echo "==> pushing agent.py to /usr/local/bin/agent"

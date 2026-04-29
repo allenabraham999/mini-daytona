@@ -59,6 +59,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="sandbox-orchestrator", lifespan=lifespan)
 
 
+AGENT_RUN_TIMEOUT_SECONDS = 300
+
+
 def get_pool() -> PoolManager:
     return app.state.pool
 
@@ -247,17 +250,12 @@ async def agent_run(
     _ensure_in_use(sb)
     await pool.touch(sandbox_id)
 
-    payload = json.dumps({
-        "task": req.task,
-        "anthropic_api_key": req.anthropic_api_key,
-        "model": req.model,
-        "max_turns": req.max_turns,
-    }).encode()
+    payload = json.dumps({"task": req.task}).encode()
 
     async def event_stream():
         try:
             async for event in backend.agent_run_stream(
-                sandbox_id, payload, req.timeout_seconds
+                sandbox_id, payload, AGENT_RUN_TIMEOUT_SECONDS
             ):
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:

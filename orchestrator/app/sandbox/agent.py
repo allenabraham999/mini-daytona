@@ -4,18 +4,21 @@
 Runs INSIDE the sandbox container. Reads a single JSON object from stdin:
 
     {"task": "<task description>",
-     "anthropic_api_key": "<sk-ant-...>",
      "max_turns": 10,            # optional
-     "model": "claude-..."}      # optional
+     "model": "gpt-..."}         # optional
 
-Drives a Claude tool-use loop with a single `bash` tool. Each step (assistant
+The API key is read from the OPENAI_API_KEY environment variable (forwarded
+in by the orchestrator), never from the request payload — keeping the secret
+off the public HTTP surface.
+
+Drives an OpenAI tool-use loop with a single `bash` tool. Each step (assistant
 text, tool call, tool result) is emitted as a JSON line on stdout so the
 orchestrator can stream it back via SSE. The final line is always:
 
     {"type": "complete", "status": "...", "output": "<final assistant text>",
      "files_created": [...], "turns": N}
 
-Stays small on purpose: one file, only stdlib + anthropic.
+Stays small on purpose: one file, only stdlib + openai.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ import subprocess
 import sys
 import time
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "gpt-4o"
 DEFAULT_MAX_TURNS = 10
 BASH_TIMEOUT_SECONDS = 60
 WATCH_DIRS = ["/tmp", "/root", "/home", "/workspace"]
@@ -38,20 +41,23 @@ The container is ephemeral — feel free to create files in /tmp or /root.
 When you have completed the task, reply with a short summary and stop calling tools."""
 
 BASH_TOOL = {
-    "name": "bash",
-    "description": (
-        "Run a bash command inside the sandbox. Returns stdout, stderr, and exit code. "
-        "Use this for ALL filesystem and execution work. Each call is a fresh shell."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "command": {
-                "type": "string",
-                "description": "The shell command to run (passed to `bash -c`).",
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": (
+            "Run a bash command inside the sandbox. Returns stdout, stderr, and exit code. "
+            "Use this for ALL filesystem and execution work. Each call is a fresh shell."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to run (passed to `bash -c`).",
+                },
             },
+            "required": ["command"],
         },
-        "required": ["command"],
     },
 }
 
@@ -119,7 +125,7 @@ def main() -> int:
         return 2
 
     task = req.get("task")
-    api_key = req.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY")
     model = req.get("model") or DEFAULT_MODEL
     max_turns = int(req.get("max_turns") or DEFAULT_MAX_TURNS)
 
@@ -127,17 +133,20 @@ def main() -> int:
         emit({"type": "error", "message": "missing 'task' in request"})
         return 2
     if not api_key:
-        emit({"type": "error", "message": "missing 'anthropic_api_key' in request"})
+        emit({"type": "error", "message": "OPENAI_API_KEY not set in sandbox environment"})
         return 2
 
     try:
-        from anthropic import Anthropic
+        from openai import OpenAI
     except ImportError:
-        emit({"type": "error", "message": "anthropic SDK not installed in sandbox"})
+        emit({"type": "error", "message": "openai SDK not installed in sandbox"})
         return 3
 
-    client = Anthropic(api_key=api_key)
-    messages: list[dict] = [{"role": "user", "content": task}]
+    client = OpenAI(api_key=api_key)
+    messages: list[dict] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": task},
+    ]
     start_ts = time.time()
     emit({"type": "start", "task": task, "model": model, "max_turns": max_turns})
 
@@ -148,50 +157,61 @@ def main() -> int:
     for turn in range(max_turns):
         turns = turn + 1
         try:
-            resp = client.messages.create(
+            resp = client.chat.completions.create(
                 model=model,
-                max_tokens=4096,
-                system=SYSTEM_PROMPT,
-                tools=[BASH_TOOL],
                 messages=messages,
+                tools=[BASH_TOOL],
             )
         except Exception as exc:
-            emit({"type": "error", "message": f"claude api error: {exc}"})
+            emit({"type": "error", "message": f"openai api error: {exc}"})
             return 4
 
-        assistant_blocks: list[dict] = []
-        tool_uses: list[dict] = []
-        text_parts: list[str] = []
+        choice = resp.choices[0]
+        msg = choice.message
+        tool_calls = msg.tool_calls or []
+        text = msg.content or ""
 
-        for block in resp.content:
-            if block.type == "text":
-                text_parts.append(block.text)
-                assistant_blocks.append({"type": "text", "text": block.text})
-                emit({"type": "text", "turn": turns, "text": block.text})
-            elif block.type == "tool_use":
-                assistant_blocks.append(
-                    {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
-                )
-                tool_uses.append({"id": block.id, "name": block.name, "input": block.input})
+        if text:
+            emit({"type": "text", "turn": turns, "text": text})
 
-        messages.append({"role": "assistant", "content": assistant_blocks})
+        # Echo the assistant message back into history. Only include tool_calls
+        # if there were any — the API rejects empty tool_calls arrays.
+        assistant_msg: dict = {"role": "assistant", "content": text}
+        if tool_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in tool_calls
+            ]
+        messages.append(assistant_msg)
 
-        if not tool_uses:
-            stop_reason = resp.stop_reason or "end_turn"
-            final_text = "\n".join(text_parts).strip()
+        if not tool_calls:
+            stop_reason = choice.finish_reason or "stop"
+            final_text = text.strip()
             break
 
-        tool_results: list[dict] = []
-        for tu in tool_uses:
-            if tu["name"] != "bash":
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tu["id"],
-                    "content": f"unknown tool: {tu['name']}",
-                    "is_error": True,
+        for tc in tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+
+            if name != "bash":
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": f"unknown tool: {name}",
                 })
                 continue
-            command = (tu["input"] or {}).get("command", "")
+
+            command = args.get("command", "")
             emit({"type": "tool_use", "turn": turns, "command": command})
             result = run_bash(command)
             emit({
@@ -201,20 +221,16 @@ def main() -> int:
                 "stdout": result["stdout"],
                 "stderr": result["stderr"],
             })
-            # Combine stdout/stderr for the model — keep it simple.
             content = f"exit_code: {result['exit_code']}\n"
             if result["stdout"]:
                 content += f"stdout:\n{result['stdout']}\n"
             if result["stderr"]:
                 content += f"stderr:\n{result['stderr']}\n"
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tu["id"],
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
                 "content": content,
-                "is_error": result["exit_code"] != 0,
             })
-
-        messages.append({"role": "user", "content": tool_results})
 
     files = snapshot_filesystem(start_ts)
     emit({

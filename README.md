@@ -87,11 +87,13 @@ Transitions are enforced in `orchestrator/app/models.py`. Anything illegal raise
 
 ## Agent runtime (Incus)
 
-The Incus backend ships a Claude-powered agent that runs inside the sandbox. The
-agent takes a task on stdin, calls the Anthropic API with a `bash` tool, and
-streams events back through SSE.
+The Incus backend ships an OpenAI-powered agent that runs inside the sandbox.
+The agent takes a task on stdin, calls the OpenAI API with a `bash` tool, and
+streams events back through SSE. The `OPENAI_API_KEY` is read from the
+orchestrator's environment and forwarded into the sandbox at exec time, so it
+never travels over the public HTTP surface.
 
-Provision the base container once on the host (installs python3 + anthropic SDK,
+Provision the base container once on the host (installs python3 + openai SDK,
 pushes `agent.py` to `/usr/local/bin/agent`, refreshes `snap0`):
 
 ```bash
@@ -111,8 +113,7 @@ SB=$(curl -s -X POST http://localhost:8000/sandbox/create \
 curl -N -X POST http://localhost:8000/sandbox/$SB/agent/run \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"task\":\"write a bash script that creates 5 random files in /tmp and list them\",
-       \"anthropic_api_key\":\"$ANTHROPIC_API_KEY\"}"
+  -d '{"task":"write a bash script that creates 5 random files in /tmp and list them"}'
 ```
 
 The response is an SSE stream of JSON events: `start`, `text`, `tool_use`,
