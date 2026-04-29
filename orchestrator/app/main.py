@@ -103,7 +103,7 @@ async def release(sandbox_id: str, pool: PoolManager = Depends(get_pool)) -> Non
 @app.get("/internal/sandbox/metrics")
 async def sandbox_metrics(backend=Depends(get_backend)) -> dict:
     if hasattr(backend, "boot_metrics"):
-        return await backend.boot_metrics()
+        return backend.boot_metrics()
     return {"error": "metrics not available for this backend"}
 
 
