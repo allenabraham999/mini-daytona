@@ -216,18 +216,7 @@ class FirecrackerSandboxBackend(SandboxBackend):
             await self._run("ip", "addr", "add", f"{host_ip}/30", "dev", tap_name)
             await self._run("ip", "link", "set", tap_name, "up")
 
-            # 3. Tell Firecracker about the TAP (must happen before snapshot load)
-            status, resp = await self._api(socket_path, "PUT", "/network-interfaces/eth0", {
-                "iface_id": "eth0",
-                "guest_mac": self._mac_from_slot(ip_slot),
-                "host_dev_name": tap_name,
-            })
-            if status not in (200, 204):
-                raise RuntimeError(
-                    f"PUT /network-interfaces failed: HTTP {status} — {resp}"
-                )
-
-            # 4. Restore snapshot and resume the VM
+            # 3. Restore snapshot and resume the VM
             status, resp = await self._api(socket_path, "PUT", "/snapshot/load", {
                 "snapshot_path": _SNAP_FILE,
                 "mem_backend": {
