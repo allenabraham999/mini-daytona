@@ -46,7 +46,13 @@ class PoolManager:
     # ----- public API ------------------------------------------------------
 
     async def warm_up(self) -> None:
-        """Pre-provision min_size sandboxes so the first request is fast."""
+        """Schedule pre-provisioning of min_size sandboxes in the background and
+        return immediately so the API can start serving (and pass healthchecks)
+        right away. If a request arrives before the pool is warm, `assign` will
+        cold-create on demand."""
+        asyncio.create_task(self._warm_up_background(), name="pool-warm-up")
+
+    async def _warm_up_background(self) -> None:
         for _ in range(self._min_size):
             try:
                 await self._provision()
