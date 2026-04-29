@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import socket
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -39,7 +40,7 @@ class _UnixSocketConnection(http.client.HTTPConnection):
 @dataclass
 class _VMRecord:
     sandbox_id: str
-    process: asyncio.subprocess.Process
+    process: subprocess.Popen
     socket_path: str
     vm_ip: str
     tap_name: str
@@ -140,28 +141,29 @@ class FirecrackerSandboxBackend(SandboxBackend):
         vm_ip     = f"172.16.{ip_slot}.2"
 
         t_start = time.monotonic()
-        process: asyncio.subprocess.Process | None = None
+        process: subprocess.Popen | None = None
         tap_created = False
 
         try:
             # 1. Start Firecracker process
-            cmd = [_BINARY, "--api-sock", socket_path, "--log-level", "Error"]
-            logger.info("Starting Firecracker: %s", " ".join(cmd))
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            logger.info("Starting Firecracker: %s --api-sock %s", _BINARY, socket_path)
+            loop = asyncio.get_event_loop()
+            process = await loop.run_in_executor(
+                None,
+                lambda: subprocess.Popen(
+                    [_BINARY, "--api-sock", socket_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ),
             )
             logger.info("Firecracker process started (PID=%s)", process.pid)
 
             # Immediately check whether the process is still alive.
             await asyncio.sleep(0.05)
-            if process.returncode is not None:
-                out, err = await self._drain_pipes(process)
+            if process.poll() is not None:
                 logger.error(
-                    "Firecracker exited immediately (PID=%s code=%d)\n"
-                    "  stdout: %s\n  stderr: %s",
-                    process.pid, process.returncode, out, err,
+                    "Firecracker exited immediately (PID=%s code=%d)",
+                    process.pid, process.returncode,
                 )
                 raise RuntimeError(
                     f"Firecracker exited immediately with code {process.returncode}"
@@ -174,7 +176,7 @@ class FirecrackerSandboxBackend(SandboxBackend):
             socket_found = False
             for attempt in range(60):
                 await asyncio.sleep(0.05)
-                alive = process.returncode is None
+                alive = process.poll() is None
                 exists = os.path.exists(socket_path)
                 logger.debug(
                     "Socket poll %d/60: exists=%s process_alive=%s path=%s",
@@ -188,11 +190,9 @@ class FirecrackerSandboxBackend(SandboxBackend):
                     socket_found = True
                     break
                 if not alive:
-                    out, err = await self._drain_pipes(process)
                     logger.error(
-                        "Firecracker (PID=%s) died at poll %d (code=%d)\n"
-                        "  stdout: %s\n  stderr: %s",
-                        process.pid, attempt + 1, process.returncode, out, err,
+                        "Firecracker (PID=%s) died at poll %d (code=%d)",
+                        process.pid, attempt + 1, process.returncode,
                     )
                     raise RuntimeError(
                         f"Firecracker process died (code={process.returncode}) "
@@ -200,17 +200,12 @@ class FirecrackerSandboxBackend(SandboxBackend):
                     )
 
             if not socket_found:
-                alive = process.returncode is None
+                alive = process.poll() is None
                 logger.error(
                     "Firecracker socket %s did not appear within 3000 ms "
                     "(process alive: %s, PID=%s)",
                     socket_path, alive, process.pid,
                 )
-                if not alive:
-                    out, err = await self._drain_pipes(process)
-                    logger.error(
-                        "  stdout: %s\n  stderr: %s", out, err
-                    )
                 raise RuntimeError(
                     f"Firecracker socket {socket_path} did not appear within 3000 ms"
                 )
@@ -273,7 +268,11 @@ class FirecrackerSandboxBackend(SandboxBackend):
             if process is not None:
                 try:
                     process.terminate()
-                    await asyncio.wait_for(process.wait(), timeout=3.0)
+                    _loop = asyncio.get_event_loop()
+                    await asyncio.wait_for(
+                        _loop.run_in_executor(None, process.wait),
+                        timeout=3.0,
+                    )
                 except Exception:
                     pass
             if tap_created:
@@ -341,8 +340,12 @@ class FirecrackerSandboxBackend(SandboxBackend):
         # SIGTERM Firecracker; escalate to SIGKILL if it lingers
         try:
             record.process.terminate()
+            loop = asyncio.get_running_loop()
             try:
-                await asyncio.wait_for(record.process.wait(), timeout=3.0)
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, record.process.wait),
+                    timeout=3.0,
+                )
             except asyncio.TimeoutError:
                 record.process.kill()
         except ProcessLookupError:
@@ -366,7 +369,7 @@ class FirecrackerSandboxBackend(SandboxBackend):
             record = self._vms.get(sandbox_id)
         if record is None:
             return False
-        if record.process.returncode is not None:
+        if record.process.poll() is not None:
             # Process has already exited
             return False
         try:
