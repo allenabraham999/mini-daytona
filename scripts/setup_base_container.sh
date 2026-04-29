@@ -44,8 +44,11 @@ incus exec "$BASE" -- bash -c '
 echo "==> installing openai SDK"
 incus exec "$BASE" -- bash -c '
   set -e
-  pip3 install --quiet --break-system-packages openai || pip3 install --quiet openai
+  pip3 install --quiet openai
 '
+
+echo "==> verifying openai import"
+incus exec "$BASE" -- python3 -c "import openai; print('ok')"
 
 echo "==> pushing agent.py to /usr/local/bin/agent"
 incus file push "$AGENT_SRC" "$BASE/usr/local/bin/agent"
@@ -53,7 +56,7 @@ incus exec "$BASE" -- chmod +x /usr/local/bin/agent
 
 echo "==> stopping $BASE and recreating snapshot $SNAP"
 incus stop "$BASE"
-incus snapshot delete "$BASE" "$SNAP" 2>/dev/null || true
-incus snapshot create "$BASE" "$SNAP"
+sudo incus snapshot delete "$BASE" "$SNAP" 2>/dev/null || true
+sudo incus snapshot "$BASE" "$SNAP"
 
 echo "done. base-container/$SNAP is ready."
