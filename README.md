@@ -87,8 +87,37 @@ Transitions are enforced in `orchestrator/app/models.py`. Anything illegal raise
 
 ## Plugging in Firecracker
 
-1. Add `orchestrator/app/sandbox/firecracker.py` with a `FirecrackerSandboxBackend(SandboxBackend)` implementation.
-2. Wire it in `orchestrator/app/sandbox/__init__.py::build_backend` under `name == "firecracker"`.
-3. Set `SANDBOX_BACKEND=firecracker` in `.env`.
+Set `SANDBOX_BACKEND=firecracker` in `.env` and configure the snapshot paths:
 
-No other code in the orchestrator or gateway should need to change.
+```env
+SANDBOX_BACKEND=firecracker
+FIRECRACKER_BINARY=/usr/local/bin/firecracker
+FIRECRACKER_SNAP_FILE=/home/ubuntu/firecracker-demo/snap.file
+FIRECRACKER_SNAP_MEM=/home/ubuntu/firecracker-demo/snap.mem
+```
+
+Each `create()` restores a fresh VM directly from the on-disk snapshot (~8 ms). No VMs sit idle between requests.
+
+No other code in the orchestrator or gateway needs to change.
+
+### Docker requirements for Firecracker
+
+The orchestrator container needs KVM access and permission to manage TAP network interfaces:
+
+```yaml
+# docker-compose.yml orchestrator service additions
+devices:
+  - /dev/kvm
+cap_add:
+  - NET_ADMIN
+privileged: true   # required for `ip` tuntap/link commands
+```
+
+Or run the orchestrator **directly on the host** (recommended for production). The API gateway can still run in Docker; only the orchestrator needs host-level network/KVM access.
+
+```bash
+# Run orchestrator on host, gateway in Docker
+cd orchestrator
+pip install -r requirements.txt
+SANDBOX_BACKEND=firecracker uvicorn app.main:app --host 0.0.0.0 --port 9000
+```
