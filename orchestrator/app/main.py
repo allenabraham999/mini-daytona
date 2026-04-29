@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import settings
 from .loops import health_check_loop, idle_reaper
@@ -122,3 +123,22 @@ async def exec_in_sandbox(
     await pool.touch(sandbox_id)
     result = await backend.exec(sandbox_id, req.command, req.timeout_seconds)
     return ExecResponse(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr)
+
+
+@app.post("/sandbox/{sandbox_id}/exec/stream")
+async def exec_stream_in_sandbox(
+    sandbox_id: str,
+    req: ExecRequest,
+    pool: PoolManager = Depends(get_pool),
+    backend=Depends(get_backend),
+) -> StreamingResponse:
+    sb = await pool.get(sandbox_id)
+    if sb.state.value != "IN_USE":
+        raise HTTPException(status_code=409, detail=f"sandbox is {sb.state.value}, not IN_USE")
+    await pool.touch(sandbox_id)
+
+    async def event_stream():
+        async for chunk in backend.exec_stream(sandbox_id, req.command, req.timeout_seconds):
+            yield f"data: {json.dumps(chunk)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")

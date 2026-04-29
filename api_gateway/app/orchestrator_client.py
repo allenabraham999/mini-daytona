@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import httpx
 from fastapi import HTTPException
 
@@ -38,6 +40,27 @@ class OrchestratorClient:
             f"/sandbox/{sandbox_id}/exec",
             {"command": command, "timeout_seconds": timeout_seconds},
         )
+
+    async def exec_stream(
+        self, sandbox_id: str, command: str, timeout_seconds: int
+    ) -> AsyncIterator[bytes]:
+        url = f"/sandbox/{sandbox_id}/exec/stream"
+        body = {"command": command, "timeout_seconds": timeout_seconds}
+        timeout = httpx.Timeout(connect=5.0, read=float(timeout_seconds) + 10.0, write=10.0, pool=5.0)
+        async with self._client.stream("POST", url, json=body, timeout=timeout) as response:
+            if response.status_code == 404:
+                raise HTTPException(status_code=404, detail="sandbox not found")
+            if response.status_code == 409:
+                await response.aread()
+                try:
+                    detail = response.json().get("detail", "conflict")
+                except Exception:
+                    detail = "conflict"
+                raise HTTPException(status_code=409, detail=detail)
+            if response.status_code >= 400:
+                raise HTTPException(status_code=502, detail=f"orchestrator error: {response.status_code}")
+            async for chunk in response.aiter_bytes():
+                yield chunk
 
     # ---- internals ----
 

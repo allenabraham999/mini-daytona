@@ -5,6 +5,7 @@ import logging
 import secrets
 import time
 import uuid
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 
 from .base import ExecResult, SandboxBackend, SandboxHandle
@@ -72,6 +73,60 @@ async def _run(
             f"incus command failed (rc={rc}): {' '.join(args)}\nstderr: {stderr}"
         )
     return rc, stdout, stderr
+
+
+async def _run_streaming(
+    *args: str, timeout: float = 30.0
+) -> AsyncGenerator[dict, None]:
+    """Run an incus CLI command and yield line-by-line output dicts."""
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    async def drain(stream: asyncio.StreamReader, stream_type: str) -> None:
+        async for raw in stream:
+            await queue.put({"type": stream_type, "data": raw.decode(errors="replace").rstrip("\n")})
+        await queue.put(None)
+
+    tasks = [
+        asyncio.create_task(drain(proc.stdout, "stdout")),
+        asyncio.create_task(drain(proc.stderr, "stderr")),
+    ]
+
+    done_streams = 0
+    deadline = asyncio.get_event_loop().time() + timeout
+    timed_out = False
+
+    while done_streams < 2:
+        remaining = deadline - asyncio.get_event_loop().time()
+        if remaining <= 0:
+            timed_out = True
+            break
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=remaining)
+        except asyncio.TimeoutError:
+            timed_out = True
+            break
+        if item is None:
+            done_streams += 1
+        else:
+            yield item
+
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    if timed_out:
+        proc.kill()
+        await proc.wait()
+        yield {"type": "exit", "data": "124"}
+    else:
+        await proc.wait()
+        yield {"type": "exit", "data": str(proc.returncode or 0)}
 
 
 async def _clone_and_stop(sandbox_id: str) -> None:
@@ -233,6 +288,22 @@ class IncusSandboxBackend(SandboxBackend):
             return ExecResult(exit_code=124, stdout="", stderr=str(exc))
         except Exception as exc:
             return ExecResult(exit_code=1, stdout="", stderr=str(exc))
+
+    async def exec_stream(
+        self, sandbox_id: str, command: str, timeout_seconds: int
+    ) -> AsyncGenerator[dict, None]:
+        async with self._lock:
+            alive = sandbox_id in self._alive
+        if not alive:
+            yield {"type": "stderr", "data": f"sandbox {sandbox_id} not found"}
+            yield {"type": "exit", "data": "127"}
+            return
+        async for chunk in _run_streaming(
+            "incus", "exec", sandbox_id, "--",
+            "sh", "-c", command,
+            timeout=float(timeout_seconds),
+        ):
+            yield chunk
 
     # ------------------------------------------------------------------
     # Extras

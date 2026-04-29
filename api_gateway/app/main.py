@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from .auth import Principal, authenticate
 from .config import settings
@@ -134,6 +134,23 @@ async def exec_in_sandbox(
     _ensure_owner(sb, principal)
     data = await orch.exec(sandbox_id, body.command, body.timeout_seconds)
     return ExecResponse(**data)
+
+
+@app.post("/sandbox/{sandbox_id}/exec/stream")
+async def exec_stream_in_sandbox(
+    sandbox_id: str,
+    body: ExecRequest,
+    principal: Principal = Depends(authenticate),
+    orch: OrchestratorClient = Depends(get_orchestrator),
+) -> StreamingResponse:
+    sb = await orch.get(sandbox_id)
+    _ensure_owner(sb, principal)
+
+    async def proxy_stream():
+        async for chunk in orch.exec_stream(sandbox_id, body.command, body.timeout_seconds):
+            yield chunk
+
+    return StreamingResponse(proxy_stream(), media_type="text/event-stream")
 
 
 def _ensure_owner(sandbox: dict, principal: Principal) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 
@@ -46,3 +47,13 @@ class SandboxBackend(ABC):
 
     @abstractmethod
     async def exec(self, sandbox_id: str, command: str, timeout_seconds: int) -> ExecResult: ...
+
+    async def exec_stream(
+        self, sandbox_id: str, command: str, timeout_seconds: int
+    ) -> AsyncIterator[dict]:
+        result = await self.exec(sandbox_id, command, timeout_seconds)
+        for line in result.stdout.splitlines():
+            yield {"type": "stdout", "data": line}
+        for line in result.stderr.splitlines():
+            yield {"type": "stderr", "data": line}
+        yield {"type": "exit", "data": str(result.exit_code)}
