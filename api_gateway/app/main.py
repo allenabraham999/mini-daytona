@@ -13,6 +13,7 @@ from .config import settings
 from .orchestrator_client import OrchestratorClient
 from .rate_limit import RateLimiterMiddleware
 from .schemas import (
+    AgentRunRequest,
     ConnectionDetails,
     CreateSandboxResponse,
     ExecRequest,
@@ -149,6 +150,25 @@ async def exec_stream_in_sandbox(
 
     async def proxy_stream():
         async for chunk in orch.exec_stream(sandbox_id, body.command, body.timeout_seconds):
+            yield chunk
+
+    return StreamingResponse(proxy_stream(), media_type="text/event-stream")
+
+
+@app.post("/sandbox/{sandbox_id}/agent/run")
+async def agent_run(
+    sandbox_id: str,
+    body: AgentRunRequest,
+    principal: Principal = Depends(authenticate),
+    orch: OrchestratorClient = Depends(get_orchestrator),
+) -> StreamingResponse:
+    sb = await orch.get(sandbox_id)
+    _ensure_owner(sb, principal)
+
+    payload = body.model_dump()
+
+    async def proxy_stream():
+        async for chunk in orch.agent_run_stream(sandbox_id, payload):
             yield chunk
 
     return StreamingResponse(proxy_stream(), media_type="text/event-stream")

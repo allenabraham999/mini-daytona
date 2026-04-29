@@ -85,6 +85,39 @@ Transitions are enforced in `orchestrator/app/models.py`. Anything illegal raise
 - **Idle reaper** runs every 15s, terminates IN_USE sandboxes idle past `IDLE_TIMEOUT_SECONDS` (default 600).
 - **Health check loop** runs every `HEALTH_CHECK_INTERVAL_SECONDS` (default 30), pings each active sandbox via the backend, marks failures and tears them down.
 
+## Agent runtime (Incus)
+
+The Incus backend ships a Claude-powered agent that runs inside the sandbox. The
+agent takes a task on stdin, calls the Anthropic API with a `bash` tool, and
+streams events back through SSE.
+
+Provision the base container once on the host (installs python3 + anthropic SDK,
+pushes `agent.py` to `/usr/local/bin/agent`, refreshes `snap0`):
+
+```bash
+scripts/setup_base_container.sh             # uses 'base-container' by default
+# scripts/setup_base_container.sh my-base   # or pass a different name
+```
+
+Re-run the script after editing `orchestrator/app/sandbox/agent.py` to refresh
+the pool's snapshot.
+
+Then exercise it end-to-end:
+
+```bash
+SB=$(curl -s -X POST http://localhost:8000/sandbox/create \
+  -H "Authorization: Bearer $TOKEN" | jq -r .sandbox_id)
+
+curl -N -X POST http://localhost:8000/sandbox/$SB/agent/run \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"task\":\"write a bash script that creates 5 random files in /tmp and list them\",
+       \"anthropic_api_key\":\"$ANTHROPIC_API_KEY\"}"
+```
+
+The response is an SSE stream of JSON events: `start`, `text`, `tool_use`,
+`tool_result`, then a final `complete` event with `output` and `files_created`.
+
 ## Plugging in Firecracker
 
 1. Add `orchestrator/app/sandbox/firecracker.py` with a `FirecrackerSandboxBackend(SandboxBackend)` implementation.

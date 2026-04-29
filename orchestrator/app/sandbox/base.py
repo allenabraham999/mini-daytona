@@ -77,3 +77,11 @@ class SandboxBackend(ABC):
     @abstractmethod
     async def list_files(self, sandbox_id: str, directory: str) -> list[dict[str, Any]]:
         """Return metadata for entries in `directory` inside the sandbox."""
+
+    async def agent_run_stream(
+        self, sandbox_id: str, payload: bytes, timeout_seconds: int
+    ) -> AsyncIterator[dict]:
+        """Stream events from the in-sandbox agent. Default impl reports that
+        the backend has no agent runtime — Incus overrides this."""
+        yield {"type": "error", "message": "agent runtime not supported by this backend"}
+        yield {"type": "exit", "data": "1"}

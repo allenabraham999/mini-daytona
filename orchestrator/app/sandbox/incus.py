@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import time
@@ -76,14 +77,22 @@ async def _run(
 
 
 async def _run_streaming(
-    *args: str, timeout: float = 30.0
+    *args: str, timeout: float = 30.0, stdin_data: bytes | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Run an incus CLI command and yield line-by-line output dicts."""
     proc = await asyncio.create_subprocess_exec(
         *args,
+        stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+
+    if stdin_data is not None and proc.stdin is not None:
+        try:
+            proc.stdin.write(stdin_data)
+            await proc.stdin.drain()
+        finally:
+            proc.stdin.close()
 
     queue: asyncio.Queue[dict | None] = asyncio.Queue()
 
@@ -171,8 +180,6 @@ async def _get_container_ip(sandbox_id: str, timeout: float = 30.0) -> str | Non
                 "incus", "query", f"/1.0/instances/{sandbox_id}/state",
                 timeout=5.0,
             )
-            import json
-
             state = json.loads(stdout)
             addresses = (
                 state.get("network", {})
@@ -327,6 +334,35 @@ class IncusSandboxBackend(SandboxBackend):
             timeout=float(timeout_seconds),
         ):
             yield chunk
+
+    async def agent_run_stream(
+        self, sandbox_id: str, payload: bytes, timeout_seconds: int
+    ) -> AsyncGenerator[dict, None]:
+        """Pipe `payload` into `python3 /usr/local/bin/agent` running inside
+        the sandbox and yield each stdout line as a parsed agent event.
+        Stderr lines and the eventual exit code are surfaced as raw events."""
+        async with self._lock:
+            alive = sandbox_id in self._alive
+        if not alive:
+            yield {"type": "error", "message": f"sandbox {sandbox_id} not found"}
+            yield {"type": "exit", "data": "127"}
+            return
+        async for chunk in _run_streaming(
+            "incus", "exec", sandbox_id, "-T", "--",
+            "python3", "/usr/local/bin/agent",
+            timeout=float(timeout_seconds),
+            stdin_data=payload,
+        ):
+            if chunk.get("type") == "stdout":
+                line = chunk["data"]
+                if not line.strip():
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    yield {"type": "log", "data": line}
+            else:
+                yield chunk
 
     # ------------------------------------------------------------------
     # File I/O

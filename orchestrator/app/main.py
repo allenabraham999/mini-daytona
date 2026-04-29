@@ -15,6 +15,7 @@ from .loops import health_check_loop, idle_reaper
 from .pool import NoCapacityError, NotFoundError, PoolManager
 from .sandbox import build_backend
 from .schemas import (
+    AgentRunRequest,
     AssignRequest,
     ExecRequest,
     ExecResponse,
@@ -231,5 +232,36 @@ async def exec_stream_in_sandbox(
     async def event_stream():
         async for chunk in backend.exec_stream(sandbox_id, req.command, req.timeout_seconds):
             yield f"data: {json.dumps(chunk)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/sandbox/{sandbox_id}/agent/run")
+async def agent_run(
+    sandbox_id: str,
+    req: AgentRunRequest,
+    pool: PoolManager = Depends(get_pool),
+    backend=Depends(get_backend),
+) -> StreamingResponse:
+    sb = await pool.get(sandbox_id)
+    _ensure_in_use(sb)
+    await pool.touch(sandbox_id)
+
+    payload = json.dumps({
+        "task": req.task,
+        "anthropic_api_key": req.anthropic_api_key,
+        "model": req.model,
+        "max_turns": req.max_turns,
+    }).encode()
+
+    async def event_stream():
+        try:
+            async for event in backend.agent_run_stream(
+                sandbox_id, payload, req.timeout_seconds
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:
+            log.exception("agent_run failed for %s", sandbox_id)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
