@@ -129,6 +129,29 @@ async def _run_streaming(
         yield {"type": "exit", "data": str(proc.returncode or 0)}
 
 
+async def _stream_file_pull(sandbox_id: str, path: str) -> AsyncGenerator[bytes, None]:
+    """Stream the contents of `path` inside `sandbox_id` via `incus file pull`."""
+    proc = await asyncio.create_subprocess_exec(
+        "incus", "file", "pull", f"{sandbox_id}{path}", "-",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        while True:
+            chunk = await proc.stdout.read(64 * 1024)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        await proc.wait()
+
+
 async def _clone_and_stop(sandbox_id: str) -> None:
     """Clone base-container/snap0 → sandbox_id and leave it stopped (pool ready)."""
     await _run("incus", "copy", f"{BASE_CONTAINER}/{BASE_SNAPSHOT}", sandbox_id)
@@ -304,6 +327,89 @@ class IncusSandboxBackend(SandboxBackend):
             timeout=float(timeout_seconds),
         ):
             yield chunk
+
+    # ------------------------------------------------------------------
+    # File I/O
+    # ------------------------------------------------------------------
+
+    async def upload_file(
+        self, sandbox_id: str, local_path: str, dest_path: str
+    ) -> None:
+        async with self._lock:
+            alive = sandbox_id in self._alive
+        if not alive:
+            raise FileNotFoundError(f"sandbox {sandbox_id} not found")
+
+        dest_dir = dest_path.rsplit("/", 1)[0] or "/"
+        await _run(
+            "incus", "exec", sandbox_id, "--",
+            "mkdir", "-p", dest_dir,
+            timeout=10.0,
+        )
+        await _run(
+            "incus", "file", "push", local_path,
+            f"{sandbox_id}{dest_path}",
+            timeout=120.0,
+        )
+
+    async def download_file(
+        self, sandbox_id: str, path: str
+    ) -> AsyncGenerator[bytes, None]:
+        async with self._lock:
+            alive = sandbox_id in self._alive
+        if not alive:
+            raise FileNotFoundError(f"sandbox {sandbox_id} not found")
+
+        # Verify the file exists before we start streaming so callers can map
+        # the failure to a 404 instead of a broken response stream.
+        rc, _, _ = await _run(
+            "incus", "exec", sandbox_id, "--",
+            "test", "-f", path,
+            timeout=5.0, check=False,
+        )
+        if rc != 0:
+            raise FileNotFoundError(f"file not found: {path}")
+
+        return _stream_file_pull(sandbox_id, path)
+
+    async def list_files(
+        self, sandbox_id: str, directory: str
+    ) -> list[dict]:
+        async with self._lock:
+            alive = sandbox_id in self._alive
+        if not alive:
+            raise FileNotFoundError(f"sandbox {sandbox_id} not found")
+
+        rc, stdout, stderr = await _run(
+            "incus", "exec", sandbox_id, "--",
+            "ls", "-la", "--time-style=full-iso", directory,
+            timeout=10.0, check=False,
+        )
+        if rc != 0:
+            raise FileNotFoundError(f"cannot list {directory}: {stderr.strip()}")
+
+        entries: list[dict] = []
+        for line in stdout.splitlines():
+            if line.startswith("total "):
+                continue
+            parts = line.split(maxsplit=8)
+            if len(parts) < 9:
+                continue
+            perms, nlinks, owner, group, size, date_, time_, tz, name = parts
+            try:
+                size_int = int(size)
+            except ValueError:
+                size_int = 0
+            entries.append({
+                "name": name,
+                "size": size_int,
+                "permissions": perms,
+                "owner": owner,
+                "group": group,
+                "modified": f"{date_} {time_} {tz}",
+                "is_dir": perms.startswith("d"),
+            })
+        return entries
 
     # ------------------------------------------------------------------
     # Extras

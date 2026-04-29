@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -151,6 +152,63 @@ async def exec_stream_in_sandbox(
             yield chunk
 
     return StreamingResponse(proxy_stream(), media_type="text/event-stream")
+
+
+@app.post("/sandbox/{sandbox_id}/files", status_code=status.HTTP_201_CREATED)
+async def upload_files(
+    sandbox_id: str,
+    files: list[UploadFile] = File(...),
+    principal: Principal = Depends(authenticate),
+    orch: OrchestratorClient = Depends(get_orchestrator),
+) -> dict:
+    sb = await orch.get(sandbox_id)
+    _ensure_owner(sb, principal)
+
+    payload: list[tuple[str, bytes, str]] = []
+    for upload in files:
+        if not upload.filename:
+            continue
+        content = await upload.read()
+        payload.append(
+            (upload.filename, content, upload.content_type or "application/octet-stream")
+        )
+    if not payload:
+        raise HTTPException(status_code=400, detail="no files in upload")
+    return await orch.upload_files(sandbox_id, payload)
+
+
+@app.get("/sandbox/{sandbox_id}/files")
+async def download_file(
+    sandbox_id: str,
+    path: str = Query(..., min_length=1),
+    principal: Principal = Depends(authenticate),
+    orch: OrchestratorClient = Depends(get_orchestrator),
+) -> StreamingResponse:
+    sb = await orch.get(sandbox_id)
+    _ensure_owner(sb, principal)
+
+    filename = os.path.basename(path) or "file"
+
+    # Awaits orchestrator headers + status so a 404/409 surfaces here as an
+    # HTTPException rather than as a 200 with an error body mid-stream.
+    stream = await orch.download_file(sandbox_id, path)
+    return StreamingResponse(
+        stream,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/sandbox/{sandbox_id}/files/list")
+async def list_files(
+    sandbox_id: str,
+    dir: str = Query(..., min_length=1),
+    principal: Principal = Depends(authenticate),
+    orch: OrchestratorClient = Depends(get_orchestrator),
+) -> dict:
+    sb = await orch.get(sandbox_id)
+    _ensure_owner(sb, principal)
+    return await orch.list_files(sandbox_id, dir)
 
 
 def _ensure_owner(sandbox: dict, principal: Principal) -> None:

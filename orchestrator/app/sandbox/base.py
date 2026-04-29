@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -57,3 +58,22 @@ class SandboxBackend(ABC):
         for line in result.stderr.splitlines():
             yield {"type": "stderr", "data": line}
         yield {"type": "exit", "data": str(result.exit_code)}
+
+    @abstractmethod
+    async def upload_file(
+        self, sandbox_id: str, local_path: str, dest_path: str
+    ) -> None:
+        """Push a file from `local_path` on the host to `dest_path` inside the sandbox."""
+
+    @abstractmethod
+    async def download_file(
+        self, sandbox_id: str, path: str
+    ) -> AsyncIterator[bytes]:
+        """Return an async iterator that yields chunks of the file at `path`.
+
+        Implementations should validate existence before returning the iterator
+        so callers can map FileNotFoundError to a 404 cleanly."""
+
+    @abstractmethod
+    async def list_files(self, sandbox_id: str, directory: str) -> list[dict[str, Any]]:
+        """Return metadata for entries in `directory` inside the sandbox."""

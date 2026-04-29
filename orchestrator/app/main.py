@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import tempfile
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import settings
@@ -123,6 +125,95 @@ async def exec_in_sandbox(
     await pool.touch(sandbox_id)
     result = await backend.exec(sandbox_id, req.command, req.timeout_seconds)
     return ExecResponse(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr)
+
+
+UPLOAD_DEST_DIR = "/tmp/uploads"
+
+
+def _ensure_in_use(sb) -> None:
+    if sb.state.value != "IN_USE":
+        raise HTTPException(status_code=409, detail=f"sandbox is {sb.state.value}, not IN_USE")
+
+
+@app.post("/sandbox/{sandbox_id}/files", status_code=status.HTTP_201_CREATED)
+async def upload_files(
+    sandbox_id: str,
+    files: list[UploadFile] = File(...),
+    pool: PoolManager = Depends(get_pool),
+    backend=Depends(get_backend),
+) -> dict:
+    sb = await pool.get(sandbox_id)
+    _ensure_in_use(sb)
+    await pool.touch(sandbox_id)
+
+    uploaded: list[str] = []
+    for upload in files:
+        if not upload.filename:
+            continue
+        # Strip any path segments — the caller doesn't get to choose where in
+        # the sandbox the file lands, only the basename.
+        safe_name = os.path.basename(upload.filename)
+        dest = f"{UPLOAD_DEST_DIR}/{safe_name}"
+
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp_path = tmp.name
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                tmp.write(chunk)
+        try:
+            await backend.upload_file(sandbox_id, tmp_path, dest)
+            uploaded.append(dest)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    return {"uploaded": uploaded}
+
+
+@app.get("/sandbox/{sandbox_id}/files")
+async def download_file(
+    sandbox_id: str,
+    path: str = Query(..., min_length=1),
+    pool: PoolManager = Depends(get_pool),
+    backend=Depends(get_backend),
+) -> StreamingResponse:
+    sb = await pool.get(sandbox_id)
+    _ensure_in_use(sb)
+    await pool.touch(sandbox_id)
+
+    try:
+        stream = await backend.download_file(sandbox_id, path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    filename = os.path.basename(path) or "file"
+    return StreamingResponse(
+        stream,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/sandbox/{sandbox_id}/files/list")
+async def list_files(
+    sandbox_id: str,
+    dir: str = Query(..., min_length=1),
+    pool: PoolManager = Depends(get_pool),
+    backend=Depends(get_backend),
+) -> dict:
+    sb = await pool.get(sandbox_id)
+    _ensure_in_use(sb)
+    await pool.touch(sandbox_id)
+
+    try:
+        entries = await backend.list_files(sandbox_id, dir)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"directory": dir, "files": entries}
 
 
 @app.post("/sandbox/{sandbox_id}/exec/stream")

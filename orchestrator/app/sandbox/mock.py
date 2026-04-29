@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+import time
 import uuid
+from collections.abc import AsyncGenerator
 
 from .base import ExecResult, SandboxBackend, SandboxHandle
 
@@ -13,6 +15,7 @@ class MockSandboxBackend(SandboxBackend):
 
     def __init__(self) -> None:
         self._alive: set[str] = set()
+        self._files: dict[str, dict[str, bytes]] = {}
         self._lock = asyncio.Lock()
 
     async def create(self) -> SandboxHandle:
@@ -48,3 +51,48 @@ class MockSandboxBackend(SandboxBackend):
             stdout=f"[mock-exec {sandbox_id}] $ {command}\nok\n",
             stderr="",
         )
+
+    async def upload_file(
+        self, sandbox_id: str, local_path: str, dest_path: str
+    ) -> None:
+        async with self._lock:
+            if sandbox_id not in self._alive:
+                raise FileNotFoundError(f"sandbox {sandbox_id} not found")
+            with open(local_path, "rb") as fh:
+                self._files.setdefault(sandbox_id, {})[dest_path] = fh.read()
+
+    async def download_file(
+        self, sandbox_id: str, path: str
+    ) -> AsyncGenerator[bytes, None]:
+        async with self._lock:
+            if sandbox_id not in self._alive:
+                raise FileNotFoundError(f"sandbox {sandbox_id} not found")
+            data = self._files.get(sandbox_id, {}).get(path)
+            if data is None:
+                raise FileNotFoundError(f"file not found: {path}")
+
+        async def _gen() -> AsyncGenerator[bytes, None]:
+            yield data
+
+        return _gen()
+
+    async def list_files(self, sandbox_id: str, directory: str) -> list[dict]:
+        async with self._lock:
+            if sandbox_id not in self._alive:
+                raise FileNotFoundError(f"sandbox {sandbox_id} not found")
+            files = self._files.get(sandbox_id, {})
+            now = time.strftime("%Y-%m-%d %H:%M:%S +0000", time.gmtime())
+            prefix = directory.rstrip("/") + "/"
+            return [
+                {
+                    "name": p[len(prefix):],
+                    "size": len(content),
+                    "permissions": "-rw-r--r--",
+                    "owner": "sandbox",
+                    "group": "sandbox",
+                    "modified": now,
+                    "is_dir": False,
+                }
+                for p, content in files.items()
+                if p.startswith(prefix) and "/" not in p[len(prefix):]
+            ]
