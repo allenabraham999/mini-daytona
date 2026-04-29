@@ -9,6 +9,16 @@ services:
       - ORCHESTRATOR_PORT=9000
     ports:
       - "9000:9000"
+    privileged: true
+    devices:
+      - /dev/kvm:/dev/kvm
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    volumes:
+      - /home/ubuntu/firecracker-demo:/home/ubuntu/firecracker-demo
+      - /tmp:/tmp
+      - /usr/local/bin/firecracker:/usr/local/bin/firecracker
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/healthz').read()"]
       interval: 10s
