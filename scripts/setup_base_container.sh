@@ -57,6 +57,6 @@ incus exec "$BASE" -- chmod +x /usr/local/bin/agent
 echo "==> stopping $BASE and recreating snapshot $SNAP"
 incus stop "$BASE"
 sudo incus snapshot delete "$BASE" "$SNAP" 2>/dev/null || true
-sudo incus snapshot "$BASE" "$SNAP"
+sudo incus snapshot create "$BASE" "$SNAP"
 
 echo "done. base-container/$SNAP is ready."
