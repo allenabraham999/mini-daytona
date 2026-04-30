@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, st
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import settings
-from .loops import health_check_loop, idle_reaper
+from .loops import health_check_loop, idle_reaper, pool_scaler
 from .pool import NoCapacityError, NotFoundError, PoolManager
 from .sandbox import build_backend
 from .schemas import (
@@ -46,6 +46,16 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(
             health_check_loop(pool, backend, settings.health_check_interval_seconds),
             name="health-check",
+        ),
+        asyncio.create_task(
+            pool_scaler(
+                pool,
+                scale_up_threshold=settings.pool_scale_up_threshold,
+                scale_down_threshold=settings.pool_scale_down_threshold,
+                idle_timeout_seconds=settings.idle_timeout_seconds,
+                interval_seconds=settings.pool_scaler_interval_seconds,
+            ),
+            name="pool-scaler",
         ),
     ]
     try:

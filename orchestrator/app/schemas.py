@@ -41,8 +41,10 @@ class ExecResponse(BaseModel):
 
 
 class PoolStats(BaseModel):
-    total: int
-    min_size: int
-    max_size: int
-    by_state: dict[str, int]
-    unhealthy: int
+    total_count: int
+    available_count: int
+    in_use_count: int
+    available_ratio: float
+    last_scale_event: dict | None
+    pool_min: int
+    pool_max: int
