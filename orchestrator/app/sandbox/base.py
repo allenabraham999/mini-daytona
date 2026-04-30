@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -46,3 +48,40 @@ class SandboxBackend(ABC):
 
     @abstractmethod
     async def exec(self, sandbox_id: str, command: str, timeout_seconds: int) -> ExecResult: ...
+
+    async def exec_stream(
+        self, sandbox_id: str, command: str, timeout_seconds: int
+    ) -> AsyncIterator[dict]:
+        result = await self.exec(sandbox_id, command, timeout_seconds)
+        for line in result.stdout.splitlines():
+            yield {"type": "stdout", "data": line}
+        for line in result.stderr.splitlines():
+            yield {"type": "stderr", "data": line}
+        yield {"type": "exit", "data": str(result.exit_code)}
+
+    @abstractmethod
+    async def upload_file(
+        self, sandbox_id: str, local_path: str, dest_path: str
+    ) -> None:
+        """Push a file from `local_path` on the host to `dest_path` inside the sandbox."""
+
+    @abstractmethod
+    async def download_file(
+        self, sandbox_id: str, path: str
+    ) -> AsyncIterator[bytes]:
+        """Return an async iterator that yields chunks of the file at `path`.
+
+        Implementations should validate existence before returning the iterator
+        so callers can map FileNotFoundError to a 404 cleanly."""
+
+    @abstractmethod
+    async def list_files(self, sandbox_id: str, directory: str) -> list[dict[str, Any]]:
+        """Return metadata for entries in `directory` inside the sandbox."""
+
+    async def agent_run_stream(
+        self, sandbox_id: str, payload: bytes, timeout_seconds: int
+    ) -> AsyncIterator[dict]:
+        """Stream events from the in-sandbox agent. Default impl reports that
+        the backend has no agent runtime — Incus overrides this."""
+        yield {"type": "error", "message": "agent runtime not supported by this backend"}
+        yield {"type": "exit", "data": "1"}

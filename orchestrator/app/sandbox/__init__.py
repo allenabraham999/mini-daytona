@@ -5,6 +5,9 @@ from .mock import MockSandboxBackend
 def build_backend(name: str) -> SandboxBackend:
     if name == "mock":
         return MockSandboxBackend()
+    if name == "incus":
+        from .incus import IncusSandboxBackend
+        return IncusSandboxBackend()
     if name == "firecracker":
         raise NotImplementedError(
             "Firecracker backend is not implemented yet. "

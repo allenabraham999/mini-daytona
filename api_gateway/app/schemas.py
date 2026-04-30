@@ -37,3 +37,7 @@ class ExecResponse(BaseModel):
     exit_code: int
     stdout: str
     stderr: str
+
+
+class AgentRunRequest(BaseModel):
+    task: str = Field(min_length=1, max_length=10_000)
