@@ -301,11 +301,18 @@ class IncusSandboxBackend(SandboxBackend):
             logger.exception("error deleting container %s", sandbox_id)
 
     async def health_check(self, sandbox_id: str) -> bool:
+        # Use the JSON state endpoint instead of parsing `incus info` text —
+        # the human-readable form changed casing across Incus versions
+        # ("Running" vs "RUNNING") and silently broke the substring match.
         try:
             rc, stdout, _ = await _run(
-                "incus", "info", sandbox_id, timeout=5.0, check=False
+                "incus", "query", f"/1.0/instances/{sandbox_id}/state",
+                timeout=5.0, check=False,
             )
-            return rc == 0 and "Status: Running" in stdout
+            if rc != 0:
+                return False
+            state = json.loads(stdout)
+            return str(state.get("status", "")).lower() == "running"
         except Exception:
             return False
 
