@@ -17,13 +17,15 @@ logger = logging.getLogger(__name__)
 
 BASE_CONTAINER = "base-container"
 BASE_SNAPSHOT = "snap0"
-POOL_SIZE = 5
 INCUS_PROJECT = settings.incus_project
 
 
 def _with_project(args: tuple[str, ...]) -> tuple[str, ...]:
-    """Inject `--project <INCUS_PROJECT>` immediately after the leading `incus`."""
-    if args and args[0] == "incus":
+    """Inject `--project <INCUS_PROJECT>` immediately after the leading `incus`.
+
+    `incus query` does not accept `--project`, so it is left untouched.
+    """
+    if args and args[0] == "incus" and (len(args) < 2 or args[1] != "query"):
         return ("incus", "--project", INCUS_PROJECT, *args[1:])
     return args
 
@@ -214,45 +216,15 @@ async def _get_container_ip(sandbox_id: str, timeout: float = 30.0) -> str | Non
 class IncusSandboxBackend(SandboxBackend):
     """Sandbox backend backed by Incus containers.
 
-    Pre-warms a pool of POOL_SIZE stopped containers cloned from
-    base-container/snap0. When one is claimed it is started immediately and
-    a replacement is queued in the background, keeping latency low.
+    Pre-warming is driven by the orchestrator's PoolManager via
+    `create_pooled()` / `start()` — this backend is a thin wrapper around
+    the incus CLI and keeps no pool of its own.
     """
 
-    def __init__(self, pool_size: int = POOL_SIZE) -> None:
-        self._pool_size = pool_size
-        self._pool: asyncio.Queue[str] = asyncio.Queue()
+    def __init__(self) -> None:
         self._alive: dict[str, SandboxHandle] = {}
         self._lock = asyncio.Lock()
         self._metrics = _BootMetrics()
-        self._initialized = False
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    async def initialize(self) -> None:
-        """Pre-warm the container pool. Call once at startup."""
-        if self._initialized:
-            return
-        self._initialized = True
-        logger.info("pre-warming %d containers", self._pool_size)
-        await asyncio.gather(*[self._add_to_pool() for _ in range(self._pool_size)])
-        logger.info("pool ready")
-
-    async def _add_to_pool(self) -> None:
-        """Clone one stopped container and push it onto the pool queue."""
-        sandbox_id = _new_id()
-        try:
-            await _clone_and_stop(sandbox_id)
-            await self._pool.put(sandbox_id)
-            logger.debug("pool +%s (size ~%d)", sandbox_id, self._pool.qsize())
-        except Exception:
-            logger.exception("failed to pre-warm container %s", sandbox_id)
-
-    def _replenish_pool(self) -> None:
-        """Schedule a background pool replenishment without blocking the caller."""
-        asyncio.get_event_loop().create_task(self._add_to_pool())
 
     # ------------------------------------------------------------------
     # SandboxBackend interface

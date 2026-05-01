@@ -109,6 +109,11 @@ class PoolManager:
                     cur = self._sandboxes.get(sandbox_id)
                     if cur is not None and cur.state == SandboxState.IN_USE:
                         cur.transition(SandboxState.TERMINATING)
+                try:
+                    await self._backend.destroy(sandbox_id)
+                except Exception:
+                    log.exception("backend destroy failed for %s after start failure", sandbox_id)
+                await self.finalize_destroy(sandbox_id)
                 raise
             async with self._lock:
                 cur = self._sandboxes.get(sandbox_id)
