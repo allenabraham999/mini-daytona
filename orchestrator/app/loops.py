@@ -132,7 +132,9 @@ async def pool_scaler(
 
 async def health_check_loop(pool: PoolManager, backend: SandboxBackend, interval_seconds: int) -> None:
     """Pings every active sandbox at the configured cadence. Marks failures as
-    unhealthy and tears them down so the pool eventually backfills."""
+    unhealthy and tears them down so the pool eventually backfills. Also reaps
+    ghost sandboxes stuck in PENDING/STARTING from provisions that never
+    completed cleanup."""
     while True:
         try:
             sandboxes = await pool.snapshot_active()
@@ -149,6 +151,15 @@ async def health_check_loop(pool: PoolManager, backend: SandboxBackend, interval
                         await backend.destroy(sb.sandbox_id)
                     finally:
                         await pool.finalize_destroy(sb.sandbox_id)
+
+            stale = await pool.reap_stale_provisions(60)
+            for sandbox_id in stale:
+                log.warning("destroying ghost sandbox %s stuck in PENDING/STARTING >60s", sandbox_id)
+                try:
+                    await backend.destroy(sandbox_id)
+                except Exception:
+                    log.exception("backend destroy failed for ghost sandbox %s", sandbox_id)
+                await pool.finalize_destroy(sandbox_id)
         except asyncio.CancelledError:
             raise
         except Exception:

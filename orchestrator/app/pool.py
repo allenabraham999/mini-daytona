@@ -337,6 +337,23 @@ class PoolManager:
                     to_destroy.append(sb.sandbox_id)
         return to_destroy
 
+    async def reap_stale_provisions(self, max_age_seconds: float = 60.0) -> list[str]:
+        """Return ids of sandboxes stuck in PENDING or STARTING longer than
+        `max_age_seconds`, transitioning them to TERMINATING. These are ghosts
+        from failed provisions where the factory hung or registration never
+        completed. Caller handles the destroy."""
+        now = time.time()
+        to_destroy: list[str] = []
+        async with self._lock:
+            for sb in self._sandboxes.values():
+                if (
+                    sb.state in (SandboxState.PENDING, SandboxState.STARTING)
+                    and (now - sb.created_at) > max_age_seconds
+                ):
+                    sb.transition(SandboxState.TERMINATING)
+                    to_destroy.append(sb.sandbox_id)
+        return to_destroy
+
     async def finalize_destroy(self, sandbox_id: str) -> None:
         async with self._lock:
             sb = self._sandboxes.get(sandbox_id)
@@ -397,6 +414,11 @@ class PoolManager:
             )
             sb.transition(SandboxState.READY)
             self._sandboxes[handle.sandbox_id] = sb
+            registered = self._sandboxes.get(handle.sandbox_id)
+            if registered is None or registered.state != SandboxState.READY:
+                raise RuntimeError(
+                    f"sandbox {handle.sandbox_id} not registered as READY after provisioning"
+                )
             return sb
 
     async def _maybe_refill(self) -> None:
