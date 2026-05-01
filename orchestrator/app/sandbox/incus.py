@@ -189,30 +189,6 @@ async def _start_container(sandbox_id: str) -> None:
     await _run("incus", "start", sandbox_id)
 
 
-async def _get_container_ip(sandbox_id: str, timeout: float = 30.0) -> str | None:
-    """Poll until eth0 has an IPv4 address, return it or None on timeout."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            _, stdout, _ = await _run(
-                "incus", "query", f"/1.0/instances/{sandbox_id}/state?project={INCUS_PROJECT}",
-                timeout=5.0,
-            )
-            state = json.loads(stdout)
-            addresses = (
-                state.get("network", {})
-                .get("eth0", {})
-                .get("addresses", [])
-            )
-            for addr in addresses:
-                if addr.get("family") == "inet" and addr.get("scope") == "global":
-                    return addr["address"]
-        except Exception:
-            pass
-        await asyncio.sleep(0.05)
-    return None
-
-
 class IncusSandboxBackend(SandboxBackend):
     """Sandbox backend backed by Incus containers.
 
@@ -266,10 +242,9 @@ class IncusSandboxBackend(SandboxBackend):
 
     async def _start_and_register(self, sandbox_id: str) -> SandboxHandle:
         await _start_container(sandbox_id)
-        ip = await _get_container_ip(sandbox_id) or sandbox_id
         handle = SandboxHandle(
             sandbox_id=sandbox_id,
-            host=ip,
+            host=sandbox_id,
             port=2222,
             ssh_user="sandbox",
             ssh_key_fingerprint=f"SHA256:{secrets.token_urlsafe(32)}",
