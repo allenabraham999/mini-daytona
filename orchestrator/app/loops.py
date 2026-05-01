@@ -138,11 +138,15 @@ async def health_check_loop(pool: PoolManager, backend: SandboxBackend, interval
     while True:
         try:
             sandboxes = await pool.snapshot_active()
+            # Pool members in READY are intentionally STOPPED (clone-but-don't-start);
+            # probing them with a "running?" check would mark them unhealthy and hide
+            # them from available_count, causing the scaler to spin until max_size.
+            in_use = [s for s in sandboxes if s.state == SandboxState.IN_USE]
             results = await asyncio.gather(
-                *(backend.health_check(s.sandbox_id) for s in sandboxes),
+                *(backend.health_check(s.sandbox_id) for s in in_use),
                 return_exceptions=True,
             )
-            for sb, ok in zip(sandboxes, results):
+            for sb, ok in zip(in_use, results):
                 healthy = bool(ok) and not isinstance(ok, BaseException)
                 await pool.mark_health(sb.sandbox_id, healthy)
                 if not healthy and sb.state == SandboxState.IN_USE:
