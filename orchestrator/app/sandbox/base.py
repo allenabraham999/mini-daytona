@@ -38,7 +38,19 @@ class SandboxBackend(ABC):
     SANDBOX_BACKEND=firecracker."""
 
     @abstractmethod
-    async def create(self) -> SandboxHandle: ...
+    async def create(self) -> SandboxHandle:
+        """Clone AND start a sandbox in one call. Used for cold, on-demand creation."""
+
+    @abstractmethod
+    async def create_pooled(self) -> SandboxHandle:
+        """Clone a sandbox without starting it. Used by the pool for pre-warming.
+
+        The returned handle has a valid sandbox_id but its connection details
+        (host/port) may be placeholders until `start()` is called."""
+
+    @abstractmethod
+    async def start(self, sandbox_id: str) -> SandboxHandle:
+        """Start a previously cloned sandbox and return its connection handle."""
 
     @abstractmethod
     async def destroy(self, sandbox_id: str) -> None: ...

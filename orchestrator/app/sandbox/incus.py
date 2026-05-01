@@ -17,13 +17,15 @@ logger = logging.getLogger(__name__)
 
 BASE_CONTAINER = "base-container"
 BASE_SNAPSHOT = "snap0"
-POOL_SIZE = 5
 INCUS_PROJECT = settings.incus_project
 
 
 def _with_project(args: tuple[str, ...]) -> tuple[str, ...]:
-    """Inject `--project <INCUS_PROJECT>` immediately after the leading `incus`."""
-    if args and args[0] == "incus":
+    """Inject `--project <INCUS_PROJECT>` immediately after the leading `incus`.
+
+    `incus query` does not accept `--project`, so it is left untouched.
+    """
+    if args and args[0] == "incus" and (len(args) < 2 or args[1] != "query"):
         return ("incus", "--project", INCUS_PROJECT, *args[1:])
     return args
 
@@ -175,7 +177,11 @@ async def _stream_file_pull(sandbox_id: str, path: str) -> AsyncGenerator[bytes,
 
 async def _clone_and_stop(sandbox_id: str) -> None:
     """Clone base-container/snap0 → sandbox_id and leave it stopped (pool ready)."""
-    await _run("incus", "copy", f"{BASE_CONTAINER}/{BASE_SNAPSHOT}", sandbox_id)
+    try:
+        await _run("incus", "copy", f"{BASE_CONTAINER}/{BASE_SNAPSHOT}", sandbox_id)
+    except Exception:
+        await _run("incus", "delete", sandbox_id, "--force", check=False)
+        raise
     # copy from a snapshot creates the container in Stopped state — nothing else needed
 
 
@@ -183,107 +189,62 @@ async def _start_container(sandbox_id: str) -> None:
     await _run("incus", "start", sandbox_id)
 
 
-async def _get_container_ip(sandbox_id: str, timeout: float = 30.0) -> str | None:
-    """Poll until eth0 has an IPv4 address, return it or None on timeout."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            _, stdout, _ = await _run(
-                "incus", "query", f"/1.0/instances/{sandbox_id}/state",
-                timeout=5.0,
-            )
-            state = json.loads(stdout)
-            addresses = (
-                state.get("network", {})
-                .get("eth0", {})
-                .get("addresses", [])
-            )
-            for addr in addresses:
-                if addr.get("family") == "inet" and addr.get("scope") == "global":
-                    return addr["address"]
-        except Exception:
-            pass
-        await asyncio.sleep(0.5)
-    return None
-
-
 class IncusSandboxBackend(SandboxBackend):
     """Sandbox backend backed by Incus containers.
 
-    Pre-warms a pool of POOL_SIZE stopped containers cloned from
-    base-container/snap0. When one is claimed it is started immediately and
-    a replacement is queued in the background, keeping latency low.
+    Pre-warming is driven by the orchestrator's PoolManager via
+    `create_pooled()` / `start()` — this backend is a thin wrapper around
+    the incus CLI and keeps no pool of its own.
     """
 
-    def __init__(self, pool_size: int = POOL_SIZE) -> None:
-        self._pool_size = pool_size
-        self._pool: asyncio.Queue[str] = asyncio.Queue()
+    def __init__(self) -> None:
         self._alive: dict[str, SandboxHandle] = {}
         self._lock = asyncio.Lock()
         self._metrics = _BootMetrics()
-        self._initialized = False
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    async def initialize(self) -> None:
-        """Pre-warm the container pool. Call once at startup."""
-        if self._initialized:
-            return
-        self._initialized = True
-        logger.info("pre-warming %d containers", self._pool_size)
-        await asyncio.gather(*[self._add_to_pool() for _ in range(self._pool_size)])
-        logger.info("pool ready")
-
-    async def _add_to_pool(self) -> None:
-        """Clone one stopped container and push it onto the pool queue."""
-        sandbox_id = _new_id()
-        try:
-            await _clone_and_stop(sandbox_id)
-            await self._pool.put(sandbox_id)
-            logger.debug("pool +%s (size ~%d)", sandbox_id, self._pool.qsize())
-        except Exception:
-            logger.exception("failed to pre-warm container %s", sandbox_id)
-
-    def _replenish_pool(self) -> None:
-        """Schedule a background pool replenishment without blocking the caller."""
-        asyncio.get_event_loop().create_task(self._add_to_pool())
 
     # ------------------------------------------------------------------
     # SandboxBackend interface
     # ------------------------------------------------------------------
 
     async def create(self) -> SandboxHandle:
+        """Cold path: clone a fresh container AND start it."""
         t0 = time.monotonic()
 
-        try:
-            # Non-blocking get: use a warm container if one is ready
-            sandbox_id = self._pool.get_nowait()
-            warm = True
-        except asyncio.QueueEmpty:
-            # Fall back to cold creation
-            logger.warning("pool empty — cold-creating container")
-            sandbox_id = _new_id()
-            await _clone_and_stop(sandbox_id)
-            warm = False
+        sandbox_id = _new_id()
+        await _clone_and_stop(sandbox_id)
+        handle = await self._start_and_register(sandbox_id)
 
-        # Start the container
-        await _start_container(sandbox_id)
+        self._metrics.record_cold(time.monotonic() - t0)
+        return handle
 
-        elapsed = time.monotonic() - t0
-        if warm:
-            self._metrics.record_warm(elapsed)
-        else:
-            self._metrics.record_cold(elapsed)
-
-        # Immediately queue a replacement so the pool refills in the background
-        self._replenish_pool()
-
-        ip = await _get_container_ip(sandbox_id) or sandbox_id
+    async def create_pooled(self) -> SandboxHandle:
+        """Pool pre-warm path: clone but do not start. Returns a handle with
+        a placeholder host — call `start()` to bring it up and resolve the IP."""
+        sandbox_id = _new_id()
+        await _clone_and_stop(sandbox_id)
         handle = SandboxHandle(
             sandbox_id=sandbox_id,
-            host=ip,
+            host=sandbox_id,
+            port=2222,
+            ssh_user="sandbox",
+            ssh_key_fingerprint=f"SHA256:{secrets.token_urlsafe(32)}",
+        )
+        async with self._lock:
+            self._alive[sandbox_id] = handle
+        return handle
+
+    async def start(self, sandbox_id: str) -> SandboxHandle:
+        """Warm path: start a previously cloned container and return its handle."""
+        t0 = time.monotonic()
+        handle = await self._start_and_register(sandbox_id)
+        self._metrics.record_warm(time.monotonic() - t0)
+        return handle
+
+    async def _start_and_register(self, sandbox_id: str) -> SandboxHandle:
+        await _start_container(sandbox_id)
+        handle = SandboxHandle(
+            sandbox_id=sandbox_id,
+            host=sandbox_id,
             port=2222,
             ssh_user="sandbox",
             ssh_key_fingerprint=f"SHA256:{secrets.token_urlsafe(32)}",
@@ -306,7 +267,7 @@ class IncusSandboxBackend(SandboxBackend):
         # ("Running" vs "RUNNING") and silently broke the substring match.
         try:
             rc, stdout, _ = await _run(
-                "incus", "query", f"/1.0/instances/{sandbox_id}/state",
+                "incus", "query", f"/1.0/instances/{sandbox_id}/state?project={INCUS_PROJECT}",
                 timeout=5.0, check=False,
             )
             if rc != 0:
@@ -471,7 +432,7 @@ class IncusSandboxBackend(SandboxBackend):
     async def get_status(self, sandbox_id: str) -> dict:
         """Return raw Incus state dict for sandbox_id."""
         _, stdout, _ = await _run(
-            "incus", "query", f"/1.0/instances/{sandbox_id}/state",
+            "incus", "query", f"/1.0/instances/{sandbox_id}/state?project={INCUS_PROJECT}",
             timeout=5.0,
         )
         import json

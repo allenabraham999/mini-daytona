@@ -132,23 +132,38 @@ async def pool_scaler(
 
 async def health_check_loop(pool: PoolManager, backend: SandboxBackend, interval_seconds: int) -> None:
     """Pings every active sandbox at the configured cadence. Marks failures as
-    unhealthy and tears them down so the pool eventually backfills."""
+    unhealthy and tears them down so the pool eventually backfills. Also reaps
+    ghost sandboxes stuck in PENDING/STARTING from provisions that never
+    completed cleanup."""
     while True:
         try:
             sandboxes = await pool.snapshot_active()
+            # Pool members in READY are intentionally STOPPED (clone-but-don't-start);
+            # probing them with a "running?" check would mark them unhealthy and hide
+            # them from available_count, causing the scaler to spin until max_size.
+            in_use = [s for s in sandboxes if s.state == SandboxState.IN_USE]
             results = await asyncio.gather(
-                *(backend.health_check(s.sandbox_id) for s in sandboxes),
+                *(backend.health_check(s.sandbox_id) for s in in_use),
                 return_exceptions=True,
             )
-            for sb, ok in zip(sandboxes, results):
+            for sb, ok in zip(in_use, results):
                 healthy = bool(ok) and not isinstance(ok, BaseException)
                 await pool.mark_health(sb.sandbox_id, healthy)
-                if not healthy and sb.state in (SandboxState.READY, SandboxState.IN_USE):
+                if not healthy and sb.state == SandboxState.IN_USE:
                     log.warning("sandbox %s failed health check; destroying", sb.sandbox_id)
                     try:
                         await backend.destroy(sb.sandbox_id)
                     finally:
                         await pool.finalize_destroy(sb.sandbox_id)
+
+            stale = await pool.reap_stale_provisions(60)
+            for sandbox_id in stale:
+                log.warning("destroying ghost sandbox %s stuck in PENDING/STARTING >60s", sandbox_id)
+                try:
+                    await backend.destroy(sandbox_id)
+                except Exception:
+                    log.exception("backend destroy failed for ghost sandbox %s", sandbox_id)
+                await pool.finalize_destroy(sandbox_id)
         except asyncio.CancelledError:
             raise
         except Exception:

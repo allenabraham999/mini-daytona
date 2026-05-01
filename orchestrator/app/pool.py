@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 
 from .models import Sandbox, SandboxState
 from .sandbox import SandboxBackend
@@ -57,11 +58,21 @@ class PoolManager:
         asyncio.create_task(self._warm_up_background(), name="pool-warm-up")
 
     async def _warm_up_background(self) -> None:
+        consecutive_failures = 0
         for _ in range(self._min_size):
             try:
                 await self._provision()
+                consecutive_failures = 0
             except Exception:
                 log.exception("warm-up provisioning failed")
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    log.error(
+                        "warm-up aborted after %d consecutive failures",
+                        consecutive_failures,
+                    )
+                    return
+                await asyncio.sleep(2 ** consecutive_failures)
 
     async def get_available(self) -> Sandbox | None:
         """Return a READY sandbox without assigning it. Mostly for diagnostics —
@@ -87,10 +98,36 @@ class PoolManager:
                 sb.user_id = user_id
                 sb.last_active_at = time.time()
                 self._last_assigned_at = sb.last_active_at
+                sandbox_id = sb.sandbox_id
+
+        if sb is not None:
+            # Warm path: pool member was cloned but not yet started. Boot it
+            # now and refresh the connection details from the backend.
+            try:
+                handle = await self._backend.start(sandbox_id)
+            except Exception:
+                async with self._lock:
+                    cur = self._sandboxes.get(sandbox_id)
+                    if cur is not None and cur.state == SandboxState.IN_USE:
+                        cur.transition(SandboxState.TERMINATING)
+                try:
+                    await self._backend.destroy(sandbox_id)
+                except Exception:
+                    log.exception("backend destroy failed for %s after start failure", sandbox_id)
+                await self.finalize_destroy(sandbox_id)
+                raise
+            async with self._lock:
+                cur = self._sandboxes.get(sandbox_id)
+                if cur is not None:
+                    cur.host = handle.host
+                    cur.port = handle.port
+                    cur.ssh_user = handle.ssh_user
+                    cur.ssh_key_fingerprint = handle.ssh_key_fingerprint
+                    return cur
                 return sb
 
-        # No READY sandbox; provision one synchronously for this request.
-        sb = await self._provision()
+        # No READY sandbox; cold-create one synchronously for this request.
+        sb = await self._provision_cold()
         async with self._lock:
             sb.transition(SandboxState.IN_USE)
             sb.user_id = user_id
@@ -189,15 +226,24 @@ class PoolManager:
             headroom = self._max_size - self._active_count_locked()
             target = max(0, min(n, headroom))
         created = 0
+        consecutive_failures = 0
         for _ in range(target):
             try:
                 await self._provision()
                 created += 1
+                consecutive_failures = 0
             except NoCapacityError:
                 break
             except Exception:
                 log.exception("scale_up provisioning failed")
-                break
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    log.error(
+                        "scale_up aborted after %d consecutive failures",
+                        consecutive_failures,
+                    )
+                    break
+                await asyncio.sleep(2 ** consecutive_failures)
         if created:
             await self._record_scale_event("scale_up", created)
         return created
@@ -291,6 +337,23 @@ class PoolManager:
                     to_destroy.append(sb.sandbox_id)
         return to_destroy
 
+    async def reap_stale_provisions(self, max_age_seconds: float = 60.0) -> list[str]:
+        """Return ids of sandboxes stuck in PENDING or STARTING longer than
+        `max_age_seconds`, transitioning them to TERMINATING. These are ghosts
+        from failed provisions where the factory hung or registration never
+        completed. Caller handles the destroy."""
+        now = time.time()
+        to_destroy: list[str] = []
+        async with self._lock:
+            for sb in self._sandboxes.values():
+                if (
+                    sb.state in (SandboxState.PENDING, SandboxState.STARTING)
+                    and (now - sb.created_at) > max_age_seconds
+                ):
+                    sb.transition(SandboxState.TERMINATING)
+                    to_destroy.append(sb.sandbox_id)
+        return to_destroy
+
     async def finalize_destroy(self, sandbox_id: str) -> None:
         async with self._lock:
             sb = self._sandboxes.get(sandbox_id)
@@ -312,10 +375,19 @@ class PoolManager:
         return sum(1 for s in self._sandboxes.values() if s.state != SandboxState.DESTROYED)
 
     async def _provision(self) -> Sandbox:
-        """Create a new sandbox via the backend and register it as READY.
-        Caller MUST NOT hold _lock when calling this — backend.create() can be slow."""
+        """Pre-warm a stopped sandbox via the backend and register it as READY.
+        The container is cloned but not started — `assign()` boots it on demand.
+        Caller MUST NOT hold _lock when calling this — backend.create_pooled() can be slow."""
+        return await self._provision_with(self._backend.create_pooled)
+
+    async def _provision_cold(self) -> Sandbox:
+        """Cold-create a fully started sandbox for an immediate assignment.
+        Used when `assign()` finds no READY sandbox and the pool is below max."""
+        return await self._provision_with(self._backend.create)
+
+    async def _provision_with(self, factory) -> Sandbox:
         # Reserve a placeholder slot so concurrent provision calls respect max_size.
-        placeholder_id = f"pending-{id(object())}"
+        placeholder_id = f"pending-{uuid.uuid4().hex[:12]}"
         async with self._lock:
             if self._active_count_locked() >= self._max_size:
                 raise NoCapacityError("pool is at max capacity")
@@ -324,7 +396,7 @@ class PoolManager:
 
         try:
             placeholder.transition(SandboxState.STARTING)
-            handle = await self._backend.create()
+            handle = await factory()
         except Exception:
             async with self._lock:
                 self._sandboxes.pop(placeholder_id, None)
@@ -342,6 +414,11 @@ class PoolManager:
             )
             sb.transition(SandboxState.READY)
             self._sandboxes[handle.sandbox_id] = sb
+            registered = self._sandboxes.get(handle.sandbox_id)
+            if registered is None or registered.state != SandboxState.READY:
+                raise RuntimeError(
+                    f"sandbox {handle.sandbox_id} not registered as READY after provisioning"
+                )
             return sb
 
     async def _maybe_refill(self) -> None:
