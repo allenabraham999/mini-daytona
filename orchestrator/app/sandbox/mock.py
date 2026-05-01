@@ -15,14 +15,11 @@ class MockSandboxBackend(SandboxBackend):
 
     def __init__(self) -> None:
         self._alive: set[str] = set()
+        self._handles: dict[str, SandboxHandle] = {}
         self._files: dict[str, dict[str, bytes]] = {}
         self._lock = asyncio.Lock()
 
-    async def create(self) -> SandboxHandle:
-        await asyncio.sleep(0.05)
-        sandbox_id = f"sbx-{uuid.uuid4().hex[:12]}"
-        async with self._lock:
-            self._alive.add(sandbox_id)
+    def _make_handle(self, sandbox_id: str) -> SandboxHandle:
         return SandboxHandle(
             sandbox_id=sandbox_id,
             host=f"10.200.0.{(hash(sandbox_id) % 250) + 2}",
@@ -31,10 +28,36 @@ class MockSandboxBackend(SandboxBackend):
             ssh_key_fingerprint=f"SHA256:{secrets.token_urlsafe(32)}",
         )
 
+    async def create(self) -> SandboxHandle:
+        await asyncio.sleep(0.05)
+        sandbox_id = f"sbx-{uuid.uuid4().hex[:12]}"
+        handle = self._make_handle(sandbox_id)
+        async with self._lock:
+            self._alive.add(sandbox_id)
+            self._handles[sandbox_id] = handle
+        return handle
+
+    async def create_pooled(self) -> SandboxHandle:
+        sandbox_id = f"sbx-{uuid.uuid4().hex[:12]}"
+        handle = self._make_handle(sandbox_id)
+        async with self._lock:
+            self._alive.add(sandbox_id)
+            self._handles[sandbox_id] = handle
+        return handle
+
+    async def start(self, sandbox_id: str) -> SandboxHandle:
+        await asyncio.sleep(0.01)
+        async with self._lock:
+            handle = self._handles.get(sandbox_id)
+            if handle is None:
+                raise RuntimeError(f"sandbox {sandbox_id} not found")
+            return handle
+
     async def destroy(self, sandbox_id: str) -> None:
         await asyncio.sleep(0.02)
         async with self._lock:
             self._alive.discard(sandbox_id)
+            self._handles.pop(sandbox_id, None)
 
     async def health_check(self, sandbox_id: str) -> bool:
         async with self._lock:

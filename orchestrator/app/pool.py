@@ -97,10 +97,31 @@ class PoolManager:
                 sb.user_id = user_id
                 sb.last_active_at = time.time()
                 self._last_assigned_at = sb.last_active_at
+                sandbox_id = sb.sandbox_id
+
+        if sb is not None:
+            # Warm path: pool member was cloned but not yet started. Boot it
+            # now and refresh the connection details from the backend.
+            try:
+                handle = await self._backend.start(sandbox_id)
+            except Exception:
+                async with self._lock:
+                    cur = self._sandboxes.get(sandbox_id)
+                    if cur is not None and cur.state == SandboxState.IN_USE:
+                        cur.transition(SandboxState.TERMINATING)
+                raise
+            async with self._lock:
+                cur = self._sandboxes.get(sandbox_id)
+                if cur is not None:
+                    cur.host = handle.host
+                    cur.port = handle.port
+                    cur.ssh_user = handle.ssh_user
+                    cur.ssh_key_fingerprint = handle.ssh_key_fingerprint
+                    return cur
                 return sb
 
-        # No READY sandbox; provision one synchronously for this request.
-        sb = await self._provision()
+        # No READY sandbox; cold-create one synchronously for this request.
+        sb = await self._provision_cold()
         async with self._lock:
             sb.transition(SandboxState.IN_USE)
             sb.user_id = user_id
@@ -331,8 +352,17 @@ class PoolManager:
         return sum(1 for s in self._sandboxes.values() if s.state != SandboxState.DESTROYED)
 
     async def _provision(self) -> Sandbox:
-        """Create a new sandbox via the backend and register it as READY.
-        Caller MUST NOT hold _lock when calling this — backend.create() can be slow."""
+        """Pre-warm a stopped sandbox via the backend and register it as READY.
+        The container is cloned but not started — `assign()` boots it on demand.
+        Caller MUST NOT hold _lock when calling this — backend.create_pooled() can be slow."""
+        return await self._provision_with(self._backend.create_pooled)
+
+    async def _provision_cold(self) -> Sandbox:
+        """Cold-create a fully started sandbox for an immediate assignment.
+        Used when `assign()` finds no READY sandbox and the pool is below max."""
+        return await self._provision_with(self._backend.create)
+
+    async def _provision_with(self, factory) -> Sandbox:
         # Reserve a placeholder slot so concurrent provision calls respect max_size.
         placeholder_id = f"pending-{id(object())}"
         async with self._lock:
@@ -343,7 +373,7 @@ class PoolManager:
 
         try:
             placeholder.transition(SandboxState.STARTING)
-            handle = await self._backend.create()
+            handle = await factory()
         except Exception:
             async with self._lock:
                 self._sandboxes.pop(placeholder_id, None)

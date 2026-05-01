@@ -259,31 +259,41 @@ class IncusSandboxBackend(SandboxBackend):
     # ------------------------------------------------------------------
 
     async def create(self) -> SandboxHandle:
+        """Cold path: clone a fresh container AND start it."""
         t0 = time.monotonic()
 
-        try:
-            # Non-blocking get: use a warm container if one is ready
-            sandbox_id = self._pool.get_nowait()
-            warm = True
-        except asyncio.QueueEmpty:
-            # Fall back to cold creation
-            logger.warning("pool empty — cold-creating container")
-            sandbox_id = _new_id()
-            await _clone_and_stop(sandbox_id)
-            warm = False
+        sandbox_id = _new_id()
+        await _clone_and_stop(sandbox_id)
+        handle = await self._start_and_register(sandbox_id)
 
-        # Start the container
+        self._metrics.record_cold(time.monotonic() - t0)
+        return handle
+
+    async def create_pooled(self) -> SandboxHandle:
+        """Pool pre-warm path: clone but do not start. Returns a handle with
+        a placeholder host — call `start()` to bring it up and resolve the IP."""
+        sandbox_id = _new_id()
+        await _clone_and_stop(sandbox_id)
+        handle = SandboxHandle(
+            sandbox_id=sandbox_id,
+            host=sandbox_id,
+            port=2222,
+            ssh_user="sandbox",
+            ssh_key_fingerprint=f"SHA256:{secrets.token_urlsafe(32)}",
+        )
+        async with self._lock:
+            self._alive[sandbox_id] = handle
+        return handle
+
+    async def start(self, sandbox_id: str) -> SandboxHandle:
+        """Warm path: start a previously cloned container and return its handle."""
+        t0 = time.monotonic()
+        handle = await self._start_and_register(sandbox_id)
+        self._metrics.record_warm(time.monotonic() - t0)
+        return handle
+
+    async def _start_and_register(self, sandbox_id: str) -> SandboxHandle:
         await _start_container(sandbox_id)
-
-        elapsed = time.monotonic() - t0
-        if warm:
-            self._metrics.record_warm(elapsed)
-        else:
-            self._metrics.record_cold(elapsed)
-
-        # Immediately queue a replacement so the pool refills in the background
-        self._replenish_pool()
-
         ip = await _get_container_ip(sandbox_id) or sandbox_id
         handle = SandboxHandle(
             sandbox_id=sandbox_id,
