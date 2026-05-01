@@ -143,7 +143,7 @@ async def health_check_loop(pool: PoolManager, backend: SandboxBackend, interval
             for sb, ok in zip(sandboxes, results):
                 healthy = bool(ok) and not isinstance(ok, BaseException)
                 await pool.mark_health(sb.sandbox_id, healthy)
-                if not healthy and sb.state in (SandboxState.READY, SandboxState.IN_USE):
+                if not healthy and sb.state == SandboxState.IN_USE:
                     log.warning("sandbox %s failed health check; destroying", sb.sandbox_id)
                     try:
                         await backend.destroy(sb.sandbox_id)
