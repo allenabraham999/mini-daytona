@@ -195,7 +195,7 @@ async def _get_container_ip(sandbox_id: str, timeout: float = 30.0) -> str | Non
     while time.monotonic() < deadline:
         try:
             _, stdout, _ = await _run(
-                "incus", "query", f"/1.0/instances/{sandbox_id}/state",
+                "incus", "query", f"/1.0/instances/{sandbox_id}/state?project={INCUS_PROJECT}",
                 timeout=5.0,
             )
             state = json.loads(stdout)
@@ -292,7 +292,7 @@ class IncusSandboxBackend(SandboxBackend):
         # ("Running" vs "RUNNING") and silently broke the substring match.
         try:
             rc, stdout, _ = await _run(
-                "incus", "query", f"/1.0/instances/{sandbox_id}/state",
+                "incus", "query", f"/1.0/instances/{sandbox_id}/state?project={INCUS_PROJECT}",
                 timeout=5.0, check=False,
             )
             if rc != 0:
@@ -457,7 +457,7 @@ class IncusSandboxBackend(SandboxBackend):
     async def get_status(self, sandbox_id: str) -> dict:
         """Return raw Incus state dict for sandbox_id."""
         _, stdout, _ = await _run(
-            "incus", "query", f"/1.0/instances/{sandbox_id}/state",
+            "incus", "query", f"/1.0/instances/{sandbox_id}/state?project={INCUS_PROJECT}",
             timeout=5.0,
         )
         import json
