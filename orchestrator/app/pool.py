@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 
 from .models import Sandbox, SandboxState
 from .sandbox import SandboxBackend
@@ -369,7 +370,7 @@ class PoolManager:
 
     async def _provision_with(self, factory) -> Sandbox:
         # Reserve a placeholder slot so concurrent provision calls respect max_size.
-        placeholder_id = f"pending-{id(object())}"
+        placeholder_id = f"pending-{uuid.uuid4().hex[:12]}"
         async with self._lock:
             if self._active_count_locked() >= self._max_size:
                 raise NoCapacityError("pool is at max capacity")
