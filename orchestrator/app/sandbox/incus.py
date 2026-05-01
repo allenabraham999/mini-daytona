@@ -175,7 +175,11 @@ async def _stream_file_pull(sandbox_id: str, path: str) -> AsyncGenerator[bytes,
 
 async def _clone_and_stop(sandbox_id: str) -> None:
     """Clone base-container/snap0 → sandbox_id and leave it stopped (pool ready)."""
-    await _run("incus", "copy", f"{BASE_CONTAINER}/{BASE_SNAPSHOT}", sandbox_id)
+    try:
+        await _run("incus", "copy", f"{BASE_CONTAINER}/{BASE_SNAPSHOT}", sandbox_id)
+    except Exception:
+        await _run("incus", "delete", sandbox_id, "--force", check=False)
+        raise
     # copy from a snapshot creates the container in Stopped state — nothing else needed
 
 

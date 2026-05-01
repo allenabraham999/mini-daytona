@@ -57,11 +57,21 @@ class PoolManager:
         asyncio.create_task(self._warm_up_background(), name="pool-warm-up")
 
     async def _warm_up_background(self) -> None:
+        consecutive_failures = 0
         for _ in range(self._min_size):
             try:
                 await self._provision()
+                consecutive_failures = 0
             except Exception:
                 log.exception("warm-up provisioning failed")
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    log.error(
+                        "warm-up aborted after %d consecutive failures",
+                        consecutive_failures,
+                    )
+                    return
+                await asyncio.sleep(2 ** consecutive_failures)
 
     async def get_available(self) -> Sandbox | None:
         """Return a READY sandbox without assigning it. Mostly for diagnostics —
@@ -189,15 +199,24 @@ class PoolManager:
             headroom = self._max_size - self._active_count_locked()
             target = max(0, min(n, headroom))
         created = 0
+        consecutive_failures = 0
         for _ in range(target):
             try:
                 await self._provision()
                 created += 1
+                consecutive_failures = 0
             except NoCapacityError:
                 break
             except Exception:
                 log.exception("scale_up provisioning failed")
-                break
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    log.error(
+                        "scale_up aborted after %d consecutive failures",
+                        consecutive_failures,
+                    )
+                    break
+                await asyncio.sleep(2 ** consecutive_failures)
         if created:
             await self._record_scale_event("scale_up", created)
         return created
