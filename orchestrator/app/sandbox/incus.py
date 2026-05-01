@@ -209,7 +209,7 @@ async def _get_container_ip(sandbox_id: str, timeout: float = 30.0) -> str | Non
                     return addr["address"]
         except Exception:
             pass
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.05)
     return None
 
 
